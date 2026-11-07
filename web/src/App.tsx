@@ -180,6 +180,8 @@ function TopBar() {
           </span>
         </span>
       )}
+      {info && (
+      <>
       <div className="nav-buttons">
         <button disabled={!canBack} onClick={back} title="Back (Esc, Alt+←)">←</button>
         <button disabled={!canFwd} onClick={forward} title="Forward (Alt+→)">→</button>
@@ -209,6 +211,8 @@ function TopBar() {
           <option value="checked">checked</option>
         </select>
       </div>
+      </>
+      )}
       <div className="spacer" />
       {discovery?.state === 'running' && <span className="busy">Discovering functions…</span>}
       <ExportMenu />
@@ -222,6 +226,7 @@ function StatusBar() {
   const fn = useStore((s) => (s.loc?.fnId ? s.byId.get(s.loc.fnId) : undefined));
   const revision = useStore((s) => s.revision);
   const count = useStore((s) => s.functions.length);
+  const open = useStore((s) => !!s.info);
   const toast = useStore((s) => s.toast);
   const [, tick] = useState(0);
   useEffect(() => {
@@ -239,9 +244,11 @@ function StatusBar() {
           {loc.addr !== fn.entry && BigInt(loc.addr) > BigInt(fn.entry) ? `+0x${(BigInt(loc.addr) - BigInt(fn.entry)).toString(16)}` : ''}
         </span>
       )}
-      <span className="dim">
-        {count} functions · rev {revision}
-      </span>
+      {open && (
+        <span className="dim">
+          {count} functions · rev {revision}
+        </span>
+      )}
       {showToast && <span className={`toast toast-${toast.kind}`}>{toast.text}</span>}
       <span className="spacer" />
       <span className="dim keys">G go · ↑↓ move · Enter follow · Ctrl+F find · N rename · Y signature · X xrefs · ; comment · Space graph · Tab pseudo · H hex · B bytes · Esc back</span>
