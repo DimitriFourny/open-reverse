@@ -56,6 +56,16 @@ let failures = 0;
     await page.locator('.side-item', { hasText: 'fixture_check' }).click();
     await page.waitForSelector('.pline:has-text("my_max(")', { timeout: 120000 });
   });
+  await step('rename a parameter from the pseudocode via N', async () => {
+    await page.locator('.side-item', { hasText: 'my_max' }).click();
+    await page.locator('.pane-pseudo .tok.t-var', { hasText: 'arg0' }).first().click();
+    await page.keyboard.press('n');
+    await page.fill('.modal-input', 'lhs');
+    await page.keyboard.press('Enter');
+    await page.waitForSelector('.pline:has-text("my_max(int32_t lhs")', { timeout: 120000 });
+    await page.waitForSelector('.pline:has-text("return lhs >")');
+    await page.locator('.side-item', { hasText: 'fixture_check' }).click();
+  });
   await step('comment', async () => {
     await page.locator('.row.insn').first().click();
     await page.keyboard.press(';');
@@ -92,6 +102,36 @@ let failures = 0;
       await page.waitForSelector('.pline', { timeout: 120000 });
     });
   }
+  await step('types: declare, inline errors, signature (Y) with a library type, callers, local rename', async () => {
+    await page.locator('.brand').click();
+    await page.locator('.recent-item', { hasText: 'macho-arm64-symbols' }).click();
+    await page.waitForSelector('.row.insn', { timeout: 120000 });
+    await page.locator('.seg button', { hasText: 'Types' }).click();
+    await page.fill('.types-input', 'struct Bad { int x }');
+    await page.keyboard.press('Control+Enter');
+    await page.waitForSelector('.types-errors:has-text("line 1")', { timeout: 120000 });
+    await page.fill('.types-input', 'typedef unsigned int count_t;');
+    await page.keyboard.press('Control+Enter');
+    await page.waitForSelector('.lib-type:has-text("count_t")', { timeout: 120000 });
+    await page.locator('.seg button', { hasText: 'Linear' }).click();
+    await page.locator('.side-item', { hasText: '_fixture_arithmetic' }).click();
+    await page.waitForSelector('.pline:has-text("fixture_arithmetic(")', { timeout: 120000 });
+    await page.keyboard.press('y');
+    await page.fill('.modal-input', 'int arith(struct Missing *m)');
+    await page.keyboard.press('Enter');
+    await page.waitForSelector('.form-error:has-text("Missing")', { timeout: 60000 });
+    await page.fill('.modal-input', 'count_t arith(int x, int y)');
+    await page.keyboard.press('Enter');
+    await page.waitForSelector('.pline:has-text("count_t arith(int32_t x, int32_t y)")', { timeout: 120000 });
+    await page.locator('.side-item', { hasText: '_fixture_direct' }).click();
+    await page.waitForSelector('.pline:has-text("extern uint32_t arith(int32_t, int32_t);")', { timeout: 120000 });
+    await page.locator('.side-item', { hasText: '_fixture_loop' }).click();
+    await page.locator('.pane-pseudo .tok.t-var', { hasText: 'accumulator' }).first().click();
+    await page.keyboard.press('n');
+    await page.fill('.modal-input', 'total');
+    await page.keyboard.press('Enter');
+    await page.waitForSelector('.pline:has-text("return total;")', { timeout: 120000 });
+  });
   if (existsSync(STRIPPED)) await step(`stripped ${STRIPPED} with background discovery`, async () => {
     await page.locator('.brand').click();
     await page.setInputFiles('input[type=file]', STRIPPED);

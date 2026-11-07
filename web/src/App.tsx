@@ -6,6 +6,7 @@ import {
   back,
   beginComment,
   beginRename,
+  beginSignature,
   beginXrefs,
   closeBinary,
   deleteBinary,
@@ -45,6 +46,7 @@ function useKeyboard() {
       else if (k === 'g' || k === 'G') setState({ dialog: { kind: 'goto' } });
       else if (k === 'n' || k === 'N') beginRename();
       else if (k === 'x' || k === 'X') beginXrefs();
+      else if (k === 'y' || k === 'Y') void beginSignature();
       else if (k === ';' || k === '/') beginComment();
       else if (k === 'Escape') {
         if (s.xrefs) setState({ xrefs: null });
@@ -146,7 +148,7 @@ function TopBar() {
     ['linear', 'Linear', 'Linear disassembly (Space toggles graph)'],
     ['graph', 'Graph', 'Control-flow graph (Space)'],
     ['hex', 'Hex', 'Hex view (H)'],
-    ['types', 'Types', 'Recovered structure types'],
+    ['types', 'Types', 'Type library editor and recovered structure types'],
   ];
   return (
     <div className="topbar">
@@ -225,7 +227,7 @@ function StatusBar() {
       </span>
       {showToast && <span className={`toast toast-${toast.kind}`}>{toast.text}</span>}
       <span className="spacer" />
-      <span className="dim keys">G go · N rename · X xrefs · ; comment · Space graph · Tab pseudo · H hex · B bytes · Esc back</span>
+      <span className="dim keys">G go · N rename · Y signature · X xrefs · ; comment · Space graph · Tab pseudo · H hex · B bytes · Esc back</span>
     </div>
   );
 }

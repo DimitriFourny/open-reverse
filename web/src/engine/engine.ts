@@ -146,6 +146,39 @@ export class Engine {
     return result;
   }
 
+  // ------------------------------------------------- types and signatures
+
+  async declareTypes(bid: string, source: string) {
+    if (typeof source !== 'string') throw new ApiError(400, 'Missing source');
+    const result = await (await this.#session(bid)).declareTypes(source);
+    void vfs.flush();
+    return result;
+  }
+
+  async removeLibraryType(bid: string, annotationId: string) {
+    const result = await (await this.#session(bid)).removeLibraryType(String(annotationId));
+    void vfs.flush();
+    return result;
+  }
+
+  async prototype(bid: string, fid: string) {
+    return (await this.#session(bid)).prototype(fid);
+  }
+
+  async setSignature(bid: string, fid: string, text: string) {
+    if (typeof text !== 'string') throw new ApiError(400, 'Missing prototype');
+    const result = await (await this.#session(bid)).setSignature(fid, text);
+    void vfs.flush();
+    return result;
+  }
+
+  async renameVariable(bid: string, fid: string, valueId: string, name: string, options: DecompileOptions) {
+    if (typeof name !== 'string') throw new ApiError(400, 'Missing name');
+    const result = await (await this.#session(bid)).renameVariable(fid, String(valueId), name, options);
+    void vfs.flush();
+    return result;
+  }
+
   async comment(bid: string, a: string, text: string) {
     const comments = await (await this.#session(bid)).comment(addr(a), String(text ?? ''));
     void vfs.flush();

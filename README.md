@@ -13,8 +13,9 @@ OpenDecomp loads, disassembles and decompiles the binary, and OpenReverse runs i
 - **Function, string, symbol and section lists**, all filterable and virtualized so they stay fast on large binaries.
 - **Cross-references** to functions, strings and data.
 - **Hex view** of the section around the cursor.
-- **Recovered types**: the image-wide merged structure types (`struct_<hex>`).
-- **Renames** of functions and globals. They are stored as OpenDecomp annotations, so every caller's pseudocode picks up the new name, and MCP agents working on the same project see them too.
+- **Types view**: an editor for the image's **type library**. Write C declarations (struct, union, enum, typedef, `<stdint.h>` names, pointers, arrays, packed) and apply them with OpenDecomp's `types_declare`; parse errors are shown inline with line and column. The library's declarations can be loaded back into the editor or deleted. Below it are the image-wide merged structure types OpenDecomp recovered (`struct_<hex>`, or the declared structure once a signature binds it).
+- **Function signatures** (`Y`, like IDA): edit the function's C prototype, e.g. `int parse(struct Node *n, char *s)`. It is stored as an asserted `signature` annotation: the function and its callers are re-decompiled with the declared types and parameter names. Named types come from the type library; builtins and pointers are declared next to the signature. Changing the name in the prototype renames the function; Reset removes the signature. OpenDecomp applies a declared signature only where its reconstruction confirms it and when type recovery is complete; a toast says when it did not (for example on ELF images, whose type recovery stays partial because OpenDecomp has no ELF DWARF reader).
+- **Renames** of functions, globals, **parameters and locals**. They are stored as OpenDecomp annotations, so every caller's pseudocode picks up the new name, and MCP agents working on the same project see them too. A parameter or local is renamed by selecting it in the pseudocode and pressing `N`: the name is a `name` annotation on the value OpenDecomp declared it from. Those values are analysis subjects, not durable addresses: the name follows the function as long as its analysis yields the same value (it survives renames, signatures and other edits), but OpenDecomp may drop it if a later analysis reshapes the function (see OpenDecomp's docs/CORE.md on value subjects). Frame-object members (`frame.local_8`) and structure members are not renameable this way; members get their names from type declarations.
 - **Comments** on any address.
 - **Stripped binaries**: whole-image function discovery runs in the background, and the function list fills in as it progresses.
 
@@ -61,7 +62,8 @@ npm run preview        # serve web/dist locally
 | Key                | Action                                            |
 | ------------------ | ------------------------------------------------- |
 | `G`, `Ctrl+P`      | Go to address / function                          |
-| `N`                | Rename the selected function, call target or global |
+| `N`                | Rename the selected function, call target, global, parameter or local |
+| `Y`                | Edit the C prototype of the selected call target (or current function) |
 | `X`                | Cross-references to the selection (or current function) |
 | `;`                | Comment at the cursor                             |
 | `Space`            | Toggle linear / graph                             |
@@ -82,6 +84,7 @@ web/src/
   engine/
     worker.ts                    Worker entry: boots WASM + SQLite, serves RPC
     engine.ts, session.ts        Per-binary OpenDecomp session and presentation
+    prototype.ts                 C prototype -> OpenDecomp signature (via its C declaration parser)
     workspace.ts, vfs.ts         Binaries/projects in a VFS persisted to IndexedDB
     shims/                       Browser implementations of the Node built-ins
 test/                            Node unit tests for the shims (npm test)
@@ -91,5 +94,5 @@ vendor/open-decomp               OpenDecomp (git submodule, unmodified)
 
 ## Tests
 
-- `npm test` runs unit tests for the shims under Node: VFS/fs, SQLite, crypto, zstd and v8.
-- `npm run test:e2e` drives the built site in Chromium. Start the site first with `npm run preview -- --port 5199`, and install the browser with `npm i -D playwright && npx playwright install chromium`. It covers upload, decompilation, renames propagating to callers, comments, persistence across a reload, graph/hex/xrefs, Mach-O and PE, and a stripped binary with background discovery.
+- `npm test` runs unit tests under Node: the shims (VFS/fs, SQLite, crypto, zstd, v8) and the C prototype compiler (with OpenDecomp's declaration parser).
+- `npm run test:e2e` drives the built site in Chromium. Start the site first with `npm run preview -- --port 5199`, and install the browser with `npm i -D playwright && npx playwright install chromium`. It covers upload, decompilation, renames propagating to callers, parameter/local renames, type declarations, signatures propagating to callers, comments, persistence across a reload, graph/hex/xrefs, Mach-O and PE, and a stripped binary with background discovery.

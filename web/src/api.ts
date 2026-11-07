@@ -90,6 +90,32 @@ export interface Decompilation {
   diagnostics: { severity: string; code: string; message: string }[];
   declarationSpan: { start: number; end: number } | null;
   mappings: Mapping[];
+  /** Parameters and locals the text declares, with the value subject a rename annotates. */
+  variables: Variable[];
+}
+
+export interface Variable {
+  name: string;
+  id: string;
+  parameter: boolean;
+}
+
+/** One declaration of the image's type library (OpenDecomp `types_declare`). */
+export interface LibraryType {
+  /** Null for the anonymous helper types (builtins, pointers) declarations need. */
+  name: string | null;
+  typeId: string;
+  annotationId: string;
+  status: string;
+  declaration: string;
+}
+
+export interface TypesInfo {
+  /** Merged recovered structure types, as C. */
+  text: string;
+  state: string;
+  libraryId: string | null;
+  library: LibraryType[];
 }
 
 export interface Xref {
@@ -235,9 +261,15 @@ export const api = {
   strings: (bid: string) => call<{ strings: StringItem[] }>('strings', [bid]),
   symbols: (bid: string) => call<{ symbols: SymbolItem[] }>('symbols', [bid]),
   sections: (bid: string) => call<{ sections: Section[] }>('sections', [bid]),
-  types: (bid: string) => call<{ text: string; state: string }>('types', [bid]),
+  types: (bid: string) => call<TypesInfo>('types', [bid]),
   memory: (bid: string, addr: string, length: number) => call<MemoryChunk>('memory', [bid, addr, length]),
   comments: (bid: string) => call<{ comments: Record<string, string> }>('comments', [bid]),
   rename: (bid: string, target: { id?: string; addr?: string }, name: string) => call<{ revision: number }>('rename', [bid, target, name]),
+  declareTypes: (bid: string, source: string) => call<{ revision: number; declared: string[] }>('declareTypes', [bid, source]),
+  removeLibraryType: (bid: string, annotationId: string) => call<{ revision: number }>('removeLibraryType', [bid, annotationId]),
+  prototype: (bid: string, fid: string) => call<{ text: string; declared: boolean }>('prototype', [bid, fid]),
+  setSignature: (bid: string, fid: string, text: string) => call<{ revision: number; confirmed: boolean }>('setSignature', [bid, fid, text]),
+  renameVariable: (bid: string, fid: string, valueId: string, name: string, o: DecompileOptions) =>
+    call<{ revision: number }>('renameVariable', [bid, fid, valueId, name, o]),
   comment: (bid: string, addr: string, text: string) => call<{ comments: Record<string, string> }>('comment', [bid, addr, text]),
 };

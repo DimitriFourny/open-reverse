@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { navigate, rename, setComment, setState, toast, useStore } from '../store.ts';
+import { navigate, rename, renameVariable, setComment, setSignature, setState, toast, useStore, type Dialog } from '../store.ts';
 import { padAddr, parseAddress } from '../util.ts';
 
 function Modal({ title, children, onClose }: { title: string; children: React.ReactNode; onClose: () => void }) {
@@ -102,6 +102,53 @@ function TextDialog({ title, initial, hint, multiline, onSubmit }: { title: stri
   );
 }
 
+/** IDA's Y: the function's C prototype, applied as an OpenDecomp signature annotation. */
+function SignatureDialog({ dialog }: { dialog: Extract<Dialog, { kind: 'signature' }> }) {
+  const [text, setText] = useState(dialog.current);
+  const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const ref = useRef<HTMLInputElement>(null);
+  useEffect(() => ref.current?.focus(), []);
+  const apply = async (value: string) => {
+    setBusy(true);
+    setError(null);
+    const err = await setSignature(dialog.fnId, value);
+    setBusy(false);
+    if (err) setError(err);
+    else close();
+  };
+  return (
+    <Modal title={`Signature of ${dialog.name}`} onClose={close}>
+      <input
+        ref={ref}
+        className="modal-input"
+        value={text}
+        spellCheck={false}
+        disabled={busy}
+        placeholder="int parse(struct Node *n, char *s)"
+        onChange={(e) => setText(e.target.value)}
+        onKeyDown={(e) => e.key === 'Enter' && void apply(text)}
+      />
+      {error && <pre className="form-error">{error}</pre>}
+      <div className="modal-foot">
+        <span className="dim">
+          C prototype. struct, union, enum and typedef names come from the type library (Types view). Stored as an asserted OpenDecomp
+          signature; callers pick it up.
+        </span>
+        {dialog.declared && (
+          <button disabled={busy} onClick={() => void apply('')} title="Remove the declared signature">
+            Reset
+          </button>
+        )}
+        <button onClick={close}>Cancel</button>
+        <button className="primary" disabled={busy} onClick={() => void apply(text)}>
+          {busy ? 'Applying…' : 'Apply'}
+        </button>
+      </div>
+    </Modal>
+  );
+}
+
 export function Dialogs() {
   const dialog = useStore((s) => s.dialog);
   if (!dialog) return null;
@@ -113,6 +160,16 @@ export function Dialogs() {
         initial={dialog.current}
         hint="Empty restores the original name. Stored as an OpenDecomp annotation."
         onSubmit={(v) => void rename(dialog.target, v)}
+      />
+    );
+  if (dialog.kind === 'signature') return <SignatureDialog dialog={dialog} />;
+  if (dialog.kind === 'renameVar')
+    return (
+      <TextDialog
+        title={`Rename ${dialog.parameter ? 'parameter' : 'local'} ${dialog.current}`}
+        initial={dialog.current}
+        hint="Empty restores the generated name. Stored as an OpenDecomp name annotation on the value."
+        onSubmit={(v) => void renameVariable(dialog.fnId, dialog.valueId, v)}
       />
     );
   if (dialog.kind === 'comment')

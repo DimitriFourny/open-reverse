@@ -3,7 +3,11 @@
 
 import { openBinary, type BinarySession, type ToolInput, type ToolResult } from '@od/api/index.js';
 import type { QueryService } from '@od/service/queries/index.js';
+import { entityIdentity, userTypeIdentity } from '@od/core/identity.js';
+import { encodeTypeDefinition } from '@od/core/serialization.js';
+import { parseCDeclarations } from '@od/metadata/c-declarations/index.js';
 import { canon, operandConstants } from './hex.ts';
+import { compilePrototype, PrototypeError, type TypeDefinition } from './prototype.ts';
 import { createHash } from './shims/crypto.ts';
 import type { BinaryRecord, Workspace } from './workspace.ts';
 
@@ -92,6 +96,40 @@ class Mutex {
   }
 }
 
+export interface LibraryType {
+  /** The C name; null for the anonymous helper types (builtins, pointers) a declaration needs. */
+  name: string | null;
+  typeId: string;
+  annotationId: string;
+  status: string;
+  declaration: string;
+}
+
+/** A parameter or local the pseudocode declares, and the value subject OpenDecomp names it by. */
+export interface Variable {
+  name: string;
+  id: string;
+  parameter: boolean;
+}
+
+const C_STATEMENT = /^(?:return|goto|break|continue|case|default|if|else|while|do|for|switch)\b/;
+
+/** The identifier a pseudocode declaration (`uint32_t count;`, `const char* s`, `count: uint32_t`) declares. */
+function declaredName(text: string, language: string): string | null {
+  const t = text.trim();
+  if (language.startsWith('python')) return /^([A-Za-z_][A-Za-z0-9_]*): [^=():]+$/.exec(t)?.[1] ?? null;
+  if (C_STATEMENT.test(t)) return null;
+  return /^(?:[A-Za-z_][A-Za-z0-9_]*[\s*]+)+([A-Za-z_][A-Za-z0-9_]*)(?:\[[^\]]*\])?;?$/.exec(t)?.[1] ?? null;
+}
+
+function errorMessages(result: unknown): string {
+  const r = result as AnyResult;
+  const errors = (r.diagnostics ?? []).filter((d) => d.severity === 'error').map((d) => d.message);
+  return [...new Set(errors.length ? errors : [r.error?.message ?? `OpenDecomp request ${r.state}`])].join('\n');
+}
+
+const AUTHOR = 'open-reverse';
+
 function annotationId(key: string): string {
   return `annotation_${createHash('sha256').update(key).digest('hex')}`;
 }
@@ -105,6 +143,8 @@ export class AnalysisSession {
   #functions: { revision: number; list: FunctionSummary[]; byId: Map<string, FunctionSummary>; byEntry: Map<string, FunctionSummary>; indexState: string } | null = null;
   #strings: Promise<Map<string, { text: string; encoding: string; id: string }>> | null = null;
   #mappings: Promise<Mapping[]> | null = null;
+  /** Type library IDs by C name (and `Name*` for its pointer type), including typedef aliases. */
+  readonly #typeNames = new Map<string, string>();
 
   private constructor(workspace: Workspace, record: BinaryRecord, binary: BinarySession) {
     this.#workspace = workspace;
@@ -355,10 +395,20 @@ export class AnalysisSession {
     return out;
   }
 
-  async types(): Promise<{ text: string; state: string }> {
+  /** Recovered image types (merged `struct_<hex>`) and the image's type library. */
+  async types(): Promise<{ text: string; state: string; libraryId: string | null; library: LibraryType[] }> {
     const result = await this.binary.types();
-    const data = need(result) as { text?: string };
-    return { text: data.text ?? '', state: result.state };
+    type Row = { name: string | null; type_id: string; annotation_id: string; status: string; declaration: string };
+    const data = need(result) as { text?: string; library_id?: string; library?: Row[] };
+    const library = (data.library ?? []).map((r) => ({
+      name: r.name,
+      typeId: r.type_id,
+      annotationId: r.annotation_id,
+      status: r.status,
+      declaration: r.declaration,
+    }));
+    for (const t of library) if (t.name) this.#typeNames.set(t.name, t.typeId);
+    return { text: data.text ?? '', state: result.state, libraryId: data.library_id ?? null, library };
   }
 
   // ------------------------------------------------------------------ memory
@@ -537,10 +587,24 @@ export class AnalysisSession {
         addrs: [...new Set(m.range_refs.map((k) => ranges[k]).filter((a): a is string => !!a))],
       }))
       .filter((m) => m.addrs.length > 0 && m.end > m.start);
+    // Parameters and locals: each declaration's mapped statement is the value subject a
+    // `name` annotation renames (the renderer prefers a unique asserted name for it).
+    const variables: Variable[] = [];
+    const decl = e.declaration_span ?? null;
+    const named = new Set<string>();
+    for (const m of e.mappings) {
+      const id = e.ids[m.semantic_refs[0] ?? -1];
+      if (!id || id === functionId) continue;
+      const name = declaredName(e.text.slice(m.start, m.end), e.language);
+      if (!name || named.has(name)) continue;
+      named.add(name);
+      variables.push({ name, id, parameter: !!decl && m.start >= decl.start && m.end <= decl.end });
+    }
     return {
       function: fn,
       text: e.text,
       language: e.language,
+      variables,
       state: result.state,
       cache: data.cache,
       diagnostics: (result.diagnostics ?? []).map((d) => ({ severity: d.severity, code: d.code, message: d.message })),
@@ -623,6 +687,172 @@ export class AnalysisSession {
       this.binary.revision = data.revision;
       return { revision: data.revision };
     });
+  }
+
+  /** Applies one annotation batch at the current revision; every error diagnostic is reported. */
+  async #apply(edits: unknown[]): Promise<{ revision: number }> {
+    const result = await this.#service.execute('annotations_apply', {
+      project_id: this.binary.projectId,
+      expected_revision: this.binary.revision,
+      author: AUTHOR,
+      origin: 'user',
+      edits,
+    } as ToolInput<'annotations_apply'>);
+    if (!('data' in result) || !result.data) throw new ApiError(400, errorMessages(result));
+    this.binary.revision = result.data.revision;
+    return { revision: result.data.revision };
+  }
+
+  async #functionAnnotations(functionId: string) {
+    const data = need(
+      await this.#service.execute('function_get', { ...this.#ctx, function_id: functionId, view: 'metadata' } as ToolInput<'function_get'>),
+    ) as { annotations?: { id: string; entity_id: string; author: string; status: string; value: { kind: string } }[] };
+    return data.annotations ?? [];
+  }
+
+  /** Declares C types (struct/union/enum/typedef) in the image's type library (`types_declare`). */
+  async declareTypes(source: string) {
+    if (!source.trim()) throw new ApiError(400, 'Nothing to declare');
+    return this.#writes.run(async () => {
+      const result = await this.#service.execute('types_declare', {
+        project_id: this.binary.projectId,
+        expected_revision: this.binary.revision,
+        image_id: this.binary.image.id,
+        author: AUTHOR,
+        origin: 'user',
+        source,
+      } as ToolInput<'types_declare'>);
+      if (!('data' in result) || !result.data) throw new ApiError(400, errorMessages(result));
+      const data = result.data;
+      this.binary.revision = data.revision;
+      for (const t of data.types) {
+        if (t.name) this.#typeNames.set(t.name, t.type_id);
+        else if (/^[A-Za-z_][A-Za-z0-9_]*\*$/.test(t.key)) this.#typeNames.set(t.key, t.type_id);
+      }
+      return { revision: data.revision, declared: [...new Set(data.types.flatMap((t) => (t.name ? [t.name] : [])))] };
+    });
+  }
+
+  /** Removes one declaration from the type library. */
+  async removeLibraryType(annotation: string) {
+    return this.#writes.run(() => this.#apply([{ operation: 'remove', id: annotation }]));
+  }
+
+  /** The current C prototype of a function (its C-like declaration line) and whether the user declared it. */
+  async prototype(functionId: string) {
+    const d = await this.decompile(functionId, { language: 'c-like', inference: 'proven', view: 'source' });
+    const span = d.declarationSpan;
+    const text = (span ? d.text.slice(span.start, span.end) : '').replace(/\s*\{\s*$/, '').trim();
+    const declared = (await this.#functionAnnotations(functionId)).some(
+      (a) => a.id === annotationId(`signature:${functionId}`) && a.status !== 'retracted',
+    );
+    return { text, declared };
+  }
+
+  /**
+   * Declares a function's prototype (IDA's Y) as an asserted `signature` annotation. The
+   * anonymous types it needs are declared on the function; named types refer to the type
+   * library. A different function name in the prototype renames the function. An empty text
+   * removes the signature.
+   */
+  async setSignature(functionId: string, text: string) {
+    const fn = await this.functionById(functionId);
+    const slice = this.binary.image.selected_slice_id;
+    const signatureId = annotationId(`signature:${functionId}`);
+    type Definition = Parameters<typeof encodeTypeDefinition>[0];
+    const result = await this.#writes.run(async () => {
+      const ours = (await this.#functionAnnotations(functionId)).filter(
+        (a) =>
+          a.author === AUTHOR &&
+          a.status !== 'retracted' &&
+          a.entity_id === functionId &&
+          (a.id === signatureId || a.value.kind === 'type'),
+      );
+      if (!text.trim()) {
+        if (ours.length === 0) return { revision: this.binary.revision };
+        return this.#apply(ours.map((a) => ({ operation: 'remove', id: a.id })));
+      }
+      let compiled;
+      try {
+        compiled = compilePrototype(text, (source) => parseCDeclarations(source, { abi: this.binary.image.target.abi }), {
+          named: (name) => this.#typeNames.get(name) ?? userTypeIdentity(slice, name),
+          pointerTo: (name) => this.#typeNames.get(`${name}*`) ?? userTypeIdentity(slice, `${name}*`),
+          local: (definition) =>
+            entityIdentity(slice, 'open-reverse-type', [JSON.stringify(encodeTypeDefinition(definition as Definition))]),
+        });
+      } catch (error) {
+        if (error instanceof PrototypeError) throw new ApiError(400, error.message);
+        throw error;
+      }
+      const set = (id: string, value: unknown) => ({ operation: 'set', id, entity_id: functionId, value, status: 'asserted', evidence_ids: [] });
+      const edits: unknown[] = [];
+      const typeAnnotations = new Set<string>();
+      for (const [typeId, definition] of compiled.declarations) {
+        const id = annotationId(`signature-type:${functionId}:${typeId}`);
+        typeAnnotations.add(id);
+        edits.push(set(id, { kind: 'type', type_id: typeId, definition: encodeTypeDefinition(definition as Definition) }));
+      }
+      edits.push(
+        set(signatureId, {
+          kind: 'signature',
+          value: {
+            abi: this.binary.image.target.abi,
+            return_type: compiled.returnType,
+            parameters: compiled.parameters.map((p, i) => ({
+              id: entityIdentity(slice, 'open-reverse-parameter', [functionId, String(i)]),
+              name: p.name,
+              type_id: p.type,
+            })),
+            variadic: compiled.variadic,
+            noreturn: false,
+            evidence_ids: [],
+          },
+        }),
+      );
+      for (const a of ours) if (a.value.kind === 'type' && !typeAnnotations.has(a.id)) edits.push({ operation: 'remove', id: a.id });
+      // Mach-O symbols carry a leading underscore that the C spelling drops.
+      const spellings = [fn.name, fn.originalName].flatMap((n) => (n ? [n, n.replace(/^_/, '')] : []));
+      if (!spellings.includes(compiled.name)) edits.push(set(annotationId(`name:${functionId}`), { kind: 'name', value: compiled.name }));
+      try {
+        return await this.#apply(edits);
+      } catch (error) {
+        if (error instanceof ApiError && /not a declaration/.test(error.message) && compiled.namedTypes.length) {
+          // Names this session saw in the library are known; the others are the likely culprits.
+          const unknown = compiled.namedTypes.filter((n) => !this.#typeNames.has(n));
+          throw new ApiError(
+            400,
+            `Declare ${(unknown.length ? unknown : compiled.namedTypes).join(', ')} in the Types view first: named types in a prototype refer to the type library.\n${error.message}`,
+          );
+        }
+        throw error;
+      }
+    });
+    if (!text.trim()) return { ...result, confirmed: true };
+    // OpenDecomp binds a declared signature only where the reconstruction confirms it
+    // (and only with complete type recovery); the header then says "source interface".
+    const d = await this.decompile(functionId, { language: 'c-like', inference: 'proven', view: 'source' });
+    return { ...result, confirmed: /source interface/.test(d.text.split('\n', 1)[0] ?? '') };
+  }
+
+  /**
+   * Renames a parameter or local: a `name` annotation on its value subject. Those are
+   * analysis-catalog subjects, so a decompilation must be published at the current revision.
+   */
+  async renameVariable(
+    functionId: string,
+    valueId: string,
+    name: string,
+    options: { language: 'c-like' | 'python-like'; inference: 'proven' | 'likely'; view: 'source' | 'checked' },
+  ) {
+    const trimmed = name.trim();
+    if (trimmed !== '' && !/^[A-Za-z_][A-Za-z0-9_]*$/.test(trimmed)) throw new ApiError(400, 'Variable names must be C identifiers');
+    try {
+      return await this.rename({ id: valueId }, trimmed);
+    } catch {
+      // The project moved on since this pseudocode was produced: publish it at this revision.
+      await this.decompile(functionId, options);
+      return this.rename({ id: valueId }, trimmed);
+    }
   }
 
   async comment(addr: string, text: string) {

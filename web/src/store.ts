@@ -13,6 +13,7 @@ import {
   type Section,
   type StringItem,
   type SymbolItem,
+  type TypesInfo,
   type Xref,
 } from './api.ts';
 import { canon } from './util.ts';
@@ -29,12 +30,16 @@ export interface Location {
 /** What N (rename) and X (xrefs) act on. */
 export type Selection =
   | { kind: 'function'; fnId: string }
-  | { kind: 'addr'; addr: string };
+  | { kind: 'addr'; addr: string }
+  /** A parameter or local of the pseudocode (N renames it). */
+  | { kind: 'variable'; fnId: string; id: string; name: string; parameter: boolean };
 
 export type Dialog =
   | { kind: 'goto' }
   | { kind: 'rename'; target: { id?: string; addr?: string }; current: string; what: string }
   | { kind: 'comment'; addr: string; current: string }
+  | { kind: 'signature'; fnId: string; name: string; current: string; declared: boolean }
+  | { kind: 'renameVar'; fnId: string; valueId: string; current: string; parameter: boolean }
   | { kind: 'open' };
 
 export interface Async<T> {
@@ -75,7 +80,7 @@ export interface State {
   strings: Async<StringItem[]>;
   symbols: Async<SymbolItem[]>;
   sections: Async<Section[]>;
-  types: Async<{ text: string; state: string }>;
+  types: Async<TypesInfo>;
   toast: { text: string; kind: 'info' | 'error'; at: number } | null;
 }
 
@@ -513,6 +518,10 @@ export async function setComment(addr: string, text: string): Promise<void> {
 export function beginRename(): void {
   const { selection, byId, byEntry, loc, listing } = state;
   let fn: FunctionSummary | undefined;
+  if (selection?.kind === 'variable') {
+    setState({ dialog: { kind: 'renameVar', fnId: selection.fnId, valueId: selection.id, current: selection.name, parameter: selection.parameter } });
+    return;
+  }
   if (selection?.kind === 'function') fn = byId.get(selection.fnId);
   else if (selection?.kind === 'addr') {
     fn = byEntry.get(selection.addr);
@@ -546,4 +555,85 @@ export function beginComment(): void {
   const addr = state.loc?.addr;
   if (!addr) return;
   setState({ dialog: { kind: 'comment', addr, current: state.comments[addr] ?? '' } });
+}
+
+// ------------------------------------------------- types and signatures
+
+/** After an annotation batch: new revision, so every view (and every caller) re-decompiles. */
+async function refreshAfterAnnotation(): Promise<void> {
+  await loadFunctions();
+  setState({ types: idle() });
+  await reloadCurrent();
+}
+
+/** Declares C types in the image's type library. Resolves to the error text, or null on success. */
+export async function declareTypes(source: string): Promise<string | null> {
+  const bid = state.bid;
+  if (!bid) return 'No binary open';
+  try {
+    const { declared } = await api.declareTypes(bid, source);
+    await refreshAfterAnnotation();
+    toast(declared.length ? `Declared ${declared.join(', ')}` : 'Types declared');
+    return null;
+  } catch (e) {
+    return errorText(e);
+  }
+}
+
+export async function removeLibraryType(annotationId: string, name: string): Promise<void> {
+  const bid = state.bid;
+  if (!bid) return;
+  try {
+    await api.removeLibraryType(bid, annotationId);
+    await refreshAfterAnnotation();
+    toast(`Removed ${name} from the type library`);
+  } catch (e) {
+    toast(errorText(e), 'error');
+  }
+}
+
+/** The signature dialog (Y) for the selected call target, else the current function. */
+export async function beginSignature(): Promise<void> {
+  const { selection, byId, loc, bid } = state;
+  const fn = (selection?.kind === 'function' ? byId.get(selection.fnId) : undefined) ?? (loc?.fnId ? byId.get(loc.fnId) : undefined);
+  if (!bid || !fn) return;
+  try {
+    const { text, declared } = await api.prototype(bid, fn.id);
+    setState({ dialog: { kind: 'signature', fnId: fn.id, name: fn.name, current: text, declared } });
+  } catch (e) {
+    toast(errorText(e), 'error');
+  }
+}
+
+/** Applies a C prototype to a function (empty removes it). Resolves to the error text, or null. */
+export async function setSignature(fnId: string, text: string): Promise<string | null> {
+  const bid = state.bid;
+  if (!bid) return 'No binary open';
+  try {
+    const { confirmed } = await api.setSignature(bid, fnId, text);
+    await refreshAfterAnnotation();
+    if (!text.trim()) toast('Signature removed');
+    else if (confirmed) toast('Signature applied');
+    else
+      toast(
+        'Signature stored, but OpenDecomp did not confirm it for this function, so its pseudocode keeps the inferred interface',
+        'error',
+      );
+    return null;
+  } catch (e) {
+    return errorText(e);
+  }
+}
+
+/** Renames a parameter or local (empty restores the generated name). */
+export async function renameVariable(fnId: string, valueId: string, name: string): Promise<void> {
+  const bid = state.bid;
+  if (!bid) return;
+  try {
+    await api.renameVariable(bid, fnId, valueId, name, state.options);
+    await refreshAfterAnnotation();
+    toast(name.trim() ? `Renamed to ${name.trim()}` : 'Name reset');
+  } catch (e) {
+    toast(errorText(e), 'error');
+  }
 }
