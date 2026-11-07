@@ -65,6 +65,8 @@ class Shared {
         live.delete(this.path!);
         this.path = null;
       },
+      busy: () => s.capi.sqlite3_get_autocommit(this.db.pointer!) === 0,
+      peek: () => s.capi.sqlite3_js_db_export(this.db.pointer!),
     });
   }
   #total(): number {

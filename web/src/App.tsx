@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
+import { ExportMenu, ImportArchiveButton, importArchive, isProjectArchive, RecentActions, StoragePanel, TaskDialog, UsageCell } from './components/DataTools.tsx';
 import { Dialogs } from './components/Dialogs.tsx';
 import { Sidebar } from './components/Sidebar.tsx';
 import { XrefsPanel } from './components/XrefsPanel.tsx';
@@ -74,7 +75,7 @@ function FilePicker({ children, className }: { children: React.ReactNode; classN
         hidden
         onChange={(e) => {
           const f = e.target.files?.[0];
-          if (f) void uploadAndOpen(f);
+          if (f) void (isProjectArchive(f) ? importArchive(f) : uploadAndOpen(f));
           e.target.value = '';
         }}
       />
@@ -94,7 +95,7 @@ function Home() {
         e.preventDefault();
         setDrag(false);
         const f = e.dataTransfer.files[0];
-        if (f) void uploadAndOpen(f);
+        if (f) void (isProjectArchive(f) ? importArchive(f) : uploadAndOpen(f));
       }}
     >
       <div className="home-card">
@@ -103,7 +104,10 @@ function Home() {
         </h1>
         <p className="dim">Reverse engineering in the browser, powered by OpenDecomp. Mach-O ARM64, PE x86-64 and ELF x86-64.</p>
         <div className="dropzone">
-          Drop a binary here or <FilePicker className="primary">Open file…</FilePicker>
+          Drop a binary or a project archive here or <FilePicker className="primary">Open file…</FilePicker>
+        </div>
+        <div className="home-actions">
+          <ImportArchiveButton />
         </div>
         {binaries.length > 0 && (
           <>
@@ -113,7 +117,9 @@ function Home() {
                 <div key={b.id} className="recent-item" onClick={() => void openBinary(b.id)}>
                   <span className="recent-name">{b.name}</span>
                   <span className="dim">{fmtSize(b.size)}</span>
+                  <UsageCell id={b.id} />
                   <span className="dim">{new Date(b.addedAt).toLocaleString()}</span>
+                  <RecentActions b={b} />
                   <button
                     className="close"
                     title="Delete binary and its analysis"
@@ -129,6 +135,8 @@ function Home() {
             </div>
           </>
         )}
+        <h2>Storage</h2>
+        <StoragePanel />
       </div>
     </div>
   );
@@ -193,6 +201,7 @@ function TopBar() {
       </div>
       <div className="spacer" />
       {discovery?.state === 'running' && <span className="busy">Discovering functions…</span>}
+      <ExportMenu />
       <FilePicker>Open…</FilePicker>
     </div>
   );
@@ -317,6 +326,7 @@ export function App() {
       <div className="app">
         <TopBar />
         <Home />
+        <TaskDialog />
         <StatusBar />
       </div>
     );
@@ -354,6 +364,7 @@ export function App() {
         </div>
       )}
       <Dialogs />
+      <TaskDialog />
       <StatusBar />
     </div>
   );

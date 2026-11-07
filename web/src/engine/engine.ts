@@ -1,9 +1,12 @@
 // The engine's public methods (what the UI calls through the worker RPC).
 // One AnalysisSession per open binary.
 
+import { ArchiveError, archiveFileName, decodeProjectArchive, encodeProjectArchive } from './archive.ts';
 import { canon, parseAddress } from './hex.ts';
 import { AnalysisSession, ApiError } from './session.ts';
 import { vfs } from './vfs.ts';
+import type { TaskContext } from './tasks.ts';
+import { exportPseudocode, snapshotProject, storageUsage } from './transfer.ts';
 import { Workspace, type BinaryRecord } from './workspace.ts';
 
 type Target = { id?: string; addr?: string };
@@ -79,6 +82,73 @@ export class Engine {
 
   async flush(): Promise<void> {
     await vfs.flush();
+  }
+
+  // ------------------------------------------- data in / out, storage
+
+  /** A project archive (see archive.ts). Works whether or not the binary is open. */
+  async exportArchive(bid: string, ctx: TaskContext): Promise<{ name: string; bytes: Uint8Array }> {
+    const record = this.workspace.get(bid);
+    if (!record) throw new ApiError(404, `Unknown binary ${bid}`);
+    const wasLoaded = vfs.isMounted(this.workspace.dir(bid));
+    await this.workspace.load(bid);
+    const snapshot = await snapshotProject(this.workspace, record, ctx);
+    if (!wasLoaded && !this.#sessions.has(bid)) await this.workspace.unload(bid);
+    const bytes = await encodeProjectArchive(snapshot, {
+      signal: ctx.signal,
+      onEntry: (done, total) => ctx.progress({ phase: 'zip', done, total }),
+    });
+    return { name: archiveFileName(record), bytes };
+  }
+
+  /** Restore a project archive. An existing binary with the same sha256 is a conflict unless `replace`. */
+  async importArchive(
+    bytes: Uint8Array,
+    opts: { replace?: boolean },
+    ctx: TaskContext,
+  ): Promise<{ status: 'imported'; record: BinaryRecord; replaced: boolean } | { status: 'conflict'; record: BinaryRecord; existing: BinaryRecord }> {
+    ctx.progress({ phase: 'read', done: 0, total: null });
+    let archive;
+    try {
+      archive = await decodeProjectArchive(bytes, undefined, ctx.signal);
+    } catch (e) {
+      if (e instanceof ArchiveError) throw new ApiError(400, e.message);
+      throw e;
+    }
+    const record: BinaryRecord = { ...archive.record, addedAt: new Date().toISOString() };
+    const existing = this.workspace.get(record.id);
+    if (existing && !opts?.replace) return { status: 'conflict', record, existing };
+    ctx.signal.throwIfAborted();
+    ctx.progress({ phase: 'write', done: 0, total: null });
+    if (existing) await this.remove(record.id);
+    await this.workspace.restore(record, archive.binary, archive.comments, archive.project);
+    await this.workspace.unload(record.id);
+    return { status: 'imported', record, replaced: !!existing };
+  }
+
+  /** Every function's pseudocode as a zip (OpenDecomp `export` layout). */
+  async exportPseudocode(bid: string, options: { language: 'c-like' | 'python-like'; inference: 'proven' | 'likely' }, ctx: TaskContext) {
+    const language = options?.language === 'python-like' ? 'python-like' : 'c-like';
+    const inference = options?.inference === 'likely' ? 'likely' : 'proven';
+    return exportPseudocode(await this.#session(bid), { language, inference }, ctx);
+  }
+
+  async storage() {
+    return { binaries: await storageUsage(this.workspace) };
+  }
+
+  /**
+   * Delete a binary's OpenDecomp project directory: the analysis cache and the
+   * annotations stored in it (renames). The binary and comments stay; the
+   * next open re-imports the binary into a fresh project.
+   */
+  async resetProject(bid: string): Promise<{ ok: true }> {
+    if (!this.workspace.get(bid)) throw new ApiError(404, `Unknown binary ${bid}`);
+    await this.#closeSession(bid);
+    await vfs.flush();
+    await vfs.removeTree(this.workspace.projectRoot(bid));
+    await this.workspace.unload(bid);
+    return { ok: true };
   }
 
   // ----------------------------------------------------------- analysis

@@ -17,6 +17,7 @@ OpenDecomp loads, disassembles and decompiles the binary, and OpenReverse runs i
 - **Renames** of functions and globals. They are stored as OpenDecomp annotations, so every caller's pseudocode picks up the new name, and MCP agents working on the same project see them too.
 - **Comments** on any address.
 - **Stripped binaries**: whole-image function discovery runs in the background, and the function list fills in as it progresses.
+- **Your data, in and out** (see [Data and storage](#data-and-storage)): project archives to back up or move a project to another browser, a zip of every function's pseudocode, download of the original binary, per-binary storage use, persistent storage, and project reset.
 
 ## How it runs
 
@@ -37,6 +38,34 @@ The OpenDecomp submodule is not modified. The three source rewrites needed in th
 - loading `iced-x86` as ESM;
 - giving each in-thread project worker its own `process` object;
 - fetching the C++ demangler WASM.
+
+## Data and storage
+
+Everything lives in the browser's IndexedDB. The home screen shows what each binary takes (binary, OpenDecomp project, comments), the browser's usage and quota (`navigator.storage.estimate()`), and a **Make storage persistent** button (`navigator.storage.persist()`): without it the browser may evict the data when the disk runs low. Each recent binary has:
+
+- **⬇** downloads the original binary.
+- **Export** saves a project archive (below).
+- **Reset** deletes the binary's OpenDecomp project directory and keeps the binary and comments. OpenDecomp stores renames as annotations in the same `project.sqlite` as its analysis cache, and has no supported way to drop cached artifacts on their own (they are indexed by rows in that database and referenced by annotation catalogs; it never prunes them), so a reset also loses renames. Export an archive first if you want to keep them.
+
+With a binary open, **Export ▾** in the top bar offers:
+
+- **All pseudocode (.zip)**: OpenDecomp's own `export` (the code of `open-decomp export`, run in the worker) in the current dialect and inference: `functions/NAME@0xADDR.c` (or `.py`; `.asm` where no pseudocode could be produced), `types.h` (the image's merged types plus the structures the functions use, `structures: 'external'`), `index.tsv`, `strings.tsv`, `imports.tsv`, `exports.tsv` and `README.txt`, in one top-level folder. Progress is reported per function and it can be cancelled. Decompiling takes up to seconds per function, and the other views wait for the function being decompiled.
+- **Project archive** and **Original binary**, as on the home screen.
+
+### Project archive format (`<name>.orproj.zip`, version 1)
+
+A standard ZIP file (stored or deflated entries, no ZIP64, so under 4 GiB) that any unzip tool can open:
+
+| Entry                | Contents |
+| -------------------- | -------- |
+| `open-reverse.json`  | Manifest: `{ "format": "open-reverse-project", "version": 1, "generator", "createdAt", "record": { "id", "name", "sha256", "size", "addedAt" } }` |
+| `binary/<name>`      | The binary. Its SHA-256 is `record.sha256` and `record.id` is the first 16 hex digits. |
+| `comments.json`      | `{ "<0xaddress>": "comment" }` |
+| `project/<path>`     | The OpenDecomp cache root of the binary: `<sha256>.default/project.sqlite` (analysis cache, annotations such as renames), `images/`, `artifacts/`. |
+
+The export works while the binary is open: the live in-memory SQLite database is serialized when no transaction is open, in the same synchronous step that copies the other files, so the database and the artifact files agree.
+
+Import (the **Import project archive…** button, or drop a `.orproj.zip` on the home screen) validates the whole archive before writing anything: the format and version (a newer version is refused), the record, the binary's SHA-256, the comments, CRC-32 and declared sizes of every entry (inflation is capped while streaming), size limits (2 GiB archive, 1 GiB per entry, 2 GiB in total), and paths: only the entries above, with no absolute, `..`, empty, backslash, colon or control-character segments, so files can only land in `/workspace/binaries/<id>/project/`. A binary that is already in the workspace (same SHA-256) is a conflict: you are asked whether to replace it, and nothing changes if you decline. Decompilations cached in the archive are served from the cache after import.
 
 ## Requirements (to build)
 
@@ -83,6 +112,8 @@ web/src/
     worker.ts                    Worker entry: boots WASM + SQLite, serves RPC
     engine.ts, session.ts        Per-binary OpenDecomp session and presentation
     workspace.ts, vfs.ts         Binaries/projects in a VFS persisted to IndexedDB
+    archive.ts, zip.ts           Project archive format and the ZIP container
+    transfer.ts, tasks.ts        Archive snapshots, pseudocode export, storage use; progress/cancel of long calls
     shims/                       Browser implementations of the Node built-ins
 test/                            Node unit tests for the shims (npm test)
 test/e2e/browser.mjs             Real-browser end-to-end test (npm run test:e2e)
@@ -91,5 +122,5 @@ vendor/open-decomp               OpenDecomp (git submodule, unmodified)
 
 ## Tests
 
-- `npm test` runs unit tests for the shims under Node: VFS/fs, SQLite, crypto, zstd and v8.
-- `npm run test:e2e` drives the built site in Chromium. Start the site first with `npm run preview -- --port 5199`, and install the browser with `npm i -D playwright && npx playwright install chromium`. It covers upload, decompilation, renames propagating to callers, comments, persistence across a reload, graph/hex/xrefs, Mach-O and PE, and a stripped binary with background discovery.
+- `npm test` runs unit tests under Node: the shims (VFS/fs, SQLite, crypto, zstd and v8) and the ZIP/project archive encoder and validator.
+- `npm run test:e2e` drives the built site in Chromium. Start the site first with `npm run preview -- --port 5199`, and install the browser with `npm i -D playwright && npx playwright install chromium`. It covers upload, decompilation, renames propagating to callers, comments, persistence across a reload, graph/hex/xrefs, Mach-O and PE, a stripped binary with background discovery, and data in/out: pseudocode export (and cancel), archive export, binary download, an import conflict, and an archive imported into a fresh browser profile keeping the rename, the comment and the cached decompilation, then a project reset. `PLAYWRIGHT_PATH` points it at a playwright package installed elsewhere.

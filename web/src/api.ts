@@ -146,8 +146,11 @@ export interface DecompileOptions {
 // SQLite and the projects in IndexedDB. Nothing is sent to a server.
 
 import type { RpcResponse } from './engine/worker.ts';
+import type { TaskProgress } from './engine/tasks.ts';
 
-type Pending = { resolve: (v: unknown) => void; reject: (e: Error) => void };
+export type { TaskProgress };
+
+type Pending = { resolve: (v: unknown) => void; reject: (e: Error) => void; onProgress?: (p: TaskProgress) => void };
 let worker: Worker | null = null;
 let nextId = 1;
 const pending = new Map<number, Pending>();
@@ -166,7 +169,8 @@ function boot(): Worker {
   worker.onmessage = (event: MessageEvent<RpcResponse>) => {
     const msg = event.data;
     if ('event' in msg) {
-      if (msg.event === 'ready') readyState?.resolve();
+      if (msg.event === 'progress') pending.get(msg.id)?.onProgress?.(msg.progress);
+      else if (msg.event === 'ready') readyState?.resolve();
       else if (msg.event === 'log') console[msg.level](`[engine] ${msg.text}`);
       else readyState?.reject(new Error(msg.error));
       return;
@@ -197,12 +201,12 @@ export function flushEngine(): void {
   if (worker) void call('flush', []).catch(() => undefined);
 }
 
-function call<T>(method: string, args: unknown[], signal?: AbortSignal, transfer: Transferable[] = []): Promise<T> {
+function call<T>(method: string, args: unknown[], signal?: AbortSignal, transfer: Transferable[] = [], onProgress?: (p: TaskProgress) => void): Promise<T> {
   const w = boot();
   const id = nextId++;
   return new Promise<T>((resolve, reject) => {
     if (signal?.aborted) return reject(new DOMException('Aborted', 'AbortError'));
-    pending.set(id, { resolve: resolve as (v: unknown) => void, reject });
+    pending.set(id, { resolve: resolve as (v: unknown) => void, reject, ...(onProgress ? { onProgress } : {}) });
     signal?.addEventListener(
       'abort',
       () => {
@@ -240,4 +244,41 @@ export const api = {
   comments: (bid: string) => call<{ comments: Record<string, string> }>('comments', [bid]),
   rename: (bid: string, target: { id?: string; addr?: string }, name: string) => call<{ revision: number }>('rename', [bid, target, name]),
   comment: (bid: string, addr: string, text: string) => call<{ comments: Record<string, string> }>('comment', [bid, addr, text]),
+
+  // ------------------------------------------------- data in / out, storage
+  /** A project archive (.orproj.zip) of a binary: the binary, its OpenDecomp project, comments. */
+  exportArchive: (bid: string, onProgress?: (p: TaskProgress) => void, signal?: AbortSignal) =>
+    call<{ name: string; bytes: Uint8Array }>('exportArchive', [bid], signal, [], onProgress),
+  /** Restore an archive. A binary that already exists is a `conflict` unless `replace`. */
+  importArchive: async (file: File, opts: { replace?: boolean } = {}, onProgress?: (p: TaskProgress) => void, signal?: AbortSignal) => {
+    const bytes = new Uint8Array(await file.arrayBuffer());
+    return call<ImportResult>('importArchive', [bytes, opts], signal, [bytes.buffer], onProgress);
+  },
+  /** A zip of every function's pseudocode plus types.h and indexes (OpenDecomp `export` layout). */
+  exportPseudocode: (bid: string, o: Pick<DecompileOptions, 'language' | 'inference'>, onProgress?: (p: TaskProgress) => void, signal?: AbortSignal) =>
+    call<{ name: string; bytes: Uint8Array; summary: PseudocodeExportSummary }>('exportPseudocode', [bid, o], signal, [], onProgress),
+  /** Bytes stored per binary (IndexedDB), split into binary, project and metadata. */
+  storage: () => call<{ binaries: BinaryUsage[] }>('storage', []),
+  /** Delete a binary's OpenDecomp project (analysis cache and annotations); keeps the binary and comments. */
+  resetProject: (bid: string) => call<{ ok: true }>('resetProject', [bid]),
 };
+
+export interface BinaryUsage {
+  id: string;
+  binary: number;
+  project: number;
+  meta: number;
+  total: number;
+}
+
+export type ImportResult =
+  | { status: 'imported'; record: BinaryRecord; replaced: boolean }
+  | { status: 'conflict'; record: BinaryRecord; existing: BinaryRecord };
+
+export interface PseudocodeExportSummary {
+  functions: number;
+  complete: number;
+  partial: number;
+  failed: number;
+  files: number;
+}

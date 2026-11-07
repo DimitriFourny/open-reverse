@@ -106,6 +106,34 @@ export class Workspace {
     await vfs.flush();
   }
 
+  /**
+   * Write a binary, its comments and its OpenDecomp project files (paths
+   * relative to the project root, already validated) as a new record.
+   * The caller removes any existing record first.
+   */
+  async restore(record: BinaryRecord, binary: Uint8Array, comments: Record<string, string>, project: Map<string, Uint8Array>): Promise<void> {
+    const dir = this.dir(record.id);
+    if (this.get(record.id) || vfs.get(dir)) throw new Error(`Binary ${record.id} already exists`);
+    const root = this.projectRoot(record.id);
+    vfs.mkdir(dir, true);
+    vfs.write(this.binaryPath(record), binary);
+    for (const [rel, data] of project) {
+      const path = vfs.norm(`${root}/${rel}`);
+      // Defense in depth: the archive reader already rejects unsafe paths.
+      if (!path.startsWith(`${root}/`)) throw new Error(`Refusing to write outside the project: ${rel}`);
+      vfs.mkdir(path.slice(0, path.lastIndexOf('/')), true);
+      vfs.write(path, data);
+    }
+    if (Object.keys(comments).length) writeJson(`${META}/${record.id}.comments.json`, comments);
+    writeJson(`${META}/${record.id}.json`, record);
+    await vfs.flush();
+  }
+
+  /** Paths of a binary's metadata files (record, comments). */
+  metaPaths(id: string): string[] {
+    return [`${META}/${check(id)}.json`, `${META}/${id}.comments.json`];
+  }
+
   async comments(id: string): Promise<Record<string, string>> {
     return readJson<Record<string, string>>(`${META}/${check(id)}.comments.json`, {});
   }

@@ -6,6 +6,7 @@ import icedWasmUrl from '@odm/iced-x86/iced_x86_bg.wasm?url';
 import { registerChildEntry } from './shims/child_process.ts';
 import { initSqlite } from './shims/sqlite.ts';
 import type { Engine } from './engine.ts';
+import { TASK_METHODS, type TaskContext, type TaskProgress } from './tasks.ts';
 
 export interface RpcRequest {
   id: number;
@@ -17,6 +18,7 @@ export type RpcResponse =
   | { id: number; ok: true; value: unknown }
   | { id: number; ok: false; error: string; status: number }
   | { event: 'ready' }
+  | { event: 'progress'; id: number; progress: TaskProgress }
   | { event: 'log'; level: 'warn' | 'error'; text: string }
   | { event: 'fatal'; error: string };
 
@@ -93,7 +95,23 @@ self.onmessage = async (event: MessageEvent<RpcMessage>) => {
     const e = await engine;
     const fn = (e as unknown as Record<string, unknown>)[method];
     if (typeof fn !== 'function' || method.startsWith('#')) throw Object.assign(new Error(`Unknown method ${method}`), { status: 404 });
-    const value = await (fn as (...a: unknown[]) => unknown).apply(e, method === 'decompile' ? [...args, abort.signal] : args);
+    let extra: unknown[] = [];
+    if (method === 'decompile') extra = [abort.signal];
+    else if (TASK_METHODS.has(method)) {
+      let last = 0;
+      const ctx: TaskContext = {
+        signal: abort.signal,
+        progress: (progress) => {
+          // At most ~20 reports a second, but always the last of a phase.
+          const now = Date.now();
+          if (now - last < 50 && progress.done !== progress.total) return;
+          last = now;
+          post({ event: 'progress', id, progress });
+        },
+      };
+      extra = [ctx];
+    }
+    const value = await (fn as (...a: unknown[]) => unknown).apply(e, [...args, ...extra]);
     post({ id, ok: true, value }, transferables(value));
   } catch (error) {
     const err = error as Error & { status?: number };
