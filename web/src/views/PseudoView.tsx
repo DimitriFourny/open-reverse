@@ -2,7 +2,7 @@
 // disassembly through OpenDecomp's emission mappings.
 
 import { useEffect, useMemo, useRef } from 'react';
-import type { Decompilation, Mapping } from '../api.ts';
+import type { Decompilation, Mapping, Variable } from '../api.ts';
 import { getState, navigate, setState, useStore } from '../store.ts';
 import { splitLines, tokenize, type Token } from '../syntax.ts';
 import { FindBar, onCodeMouseDown, useDomFind } from './codeui.tsx';
@@ -45,6 +45,16 @@ export function PseudoView({ decomp }: { decomp: Decompilation }) {
   const linesRef = useRef<HTMLDivElement>(null);
 
   const lines = useMemo(() => splitLines(tokenize(decomp.text, decomp.language)), [decomp]);
+  const variables = useMemo(() => new Map((decomp.variables ?? []).map((v) => [v.name, v])), [decomp]);
+  /** The parameter or local a token names (not a member after `.` or `->`). */
+  const variableAt = (line: Token[], i: number) => {
+    const t = line[i]!;
+    if (t.kind !== 'ident') return undefined;
+    let j = i - 1;
+    while (j >= 0 && line[j]!.kind === 'space') j--;
+    const prev = line[j]?.text;
+    return prev === '.' || prev === '->' ? undefined : variables.get(t.text);
+  };
 
   // When the cursor moved in the disassembly (not from a click here), highlight its statements.
   const spans = useMemo(() => (cursor && linked.size === 0 ? spansFor(decomp.mappings, cursor) : []), [decomp, cursor, linked]);
@@ -61,7 +71,7 @@ export function PseudoView({ decomp }: { decomp: Decompilation }) {
     if (r.top < box.top || r.bottom > box.bottom) el.scrollIntoView({ block: 'center' });
   }, [spans, linked]);
 
-  const onToken = (t: Token) => {
+  const onToken = (t: Token, variable?: Variable) => {
     const decl = decomp.declarationSpan;
     const inDecl = !!decl && t.start >= decl.start && t.start < decl.end;
     const m = inDecl ? null : mappingAt(decomp.mappings, t.start, decl);
@@ -71,7 +81,11 @@ export function PseudoView({ decomp }: { decomp: Decompilation }) {
     const loc = getState().loc;
     setState({
       linked: new Set(addrs),
-      selection: fn ? { kind: 'function', fnId: fn.id } : null,
+      selection: fn
+        ? { kind: 'function', fnId: fn.id }
+        : variable
+          ? { kind: 'variable', fnId: decomp.function.id, id: variable.id, name: variable.name, parameter: variable.parameter }
+          : null,
       ...(addrs[0] && loc ? { loc: { ...loc, addr: addrs[0] } } : {}),
     });
   };
@@ -92,18 +106,27 @@ export function PseudoView({ decomp }: { decomp: Decompilation }) {
             <div key={n} className="pline">
               <span className="lineno">{n + 1}</span>
               <span className="ptext">
-                {line.map((t) => {
+                {line.map((t, i) => {
                   const fn = t.kind === 'call' || t.kind === 'ident' ? byName.get(t.text) : undefined;
-                  const sel = fn && selection?.kind === 'function' && selection.fnId === fn.id;
+                  const variable = fn ? undefined : variableAt(line, i);
+                  const sel =
+                    (fn && selection?.kind === 'function' && selection.fnId === fn.id) ||
+                    (variable && selection?.kind === 'variable' && selection.id === variable.id);
                   const k = pseudoKey(t.kind, t.text);
                   return (
                     <span
                       key={t.start}
                       data-k={k ?? undefined}
-                      className={`tok t-${fn ? 'fn' : t.kind}${hot(t) ? ' hot' : ''}${sel ? ' selected' : ''}`}
-                      onClick={() => onToken(t)}
+                      className={`tok t-${fn ? 'fn' : t.kind}${variable ? ' t-var' : ''}${hot(t) ? ' hot' : ''}${sel ? ' selected' : ''}`}
+                      onClick={() => onToken(t, variable)}
                       onDoubleClick={fn ? () => void navigate(fn.entry) : undefined}
-                      title={fn ? `${fn.name} @ ${fn.entry} — double-click to open` : undefined}
+                      title={
+                        fn
+                          ? `${fn.name} @ ${fn.entry} — double-click to open`
+                          : variable
+                            ? `${variable.parameter ? 'parameter' : 'local'} ${variable.name} — N to rename`
+                            : undefined
+                      }
                     >
                       {t.text}
                     </span>
