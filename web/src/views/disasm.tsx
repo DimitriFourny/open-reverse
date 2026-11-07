@@ -1,7 +1,8 @@
 // Shared rendering of one instruction's operands and auto-comments.
 
 import type { Instruction, Listing, OperandRef } from '../api.ts';
-import { navigate, setCursor, useStore } from '../store.ts';
+import { getState, navigate, setCursor, useStore } from '../store.ts';
+import { numberKey, operandTokens } from './tokens.ts';
 
 export interface ResolvedRef extends OperandRef {
   local: boolean;
@@ -27,24 +28,44 @@ export function branchTargets(listing: Listing): Set<string> {
   return out;
 }
 
+/** Plain operand text split into highlightable tokens (spans with data-k). */
+function plainTokens(text: string, parts: React.ReactNode[], key: { n: number }): void {
+  for (const t of operandTokens(text)) {
+    if (t.key)
+      parts.push(
+        <span key={key.n++} data-k={t.key}>
+          {t.text}
+        </span>,
+      );
+    else parts.push(t.text);
+  }
+}
+
+/** Highlight key of a resolved reference, as it is displayed. */
+export function refKey(r: ResolvedRef): string {
+  if (r.local) return `i:${labelFor(r.addr)}`;
+  if (r.kind === 'function') return `i:${r.label}`;
+  return numberKey(r.text) ?? `n:${BigInt(r.addr).toString(16)}`;
+}
+
 export function Operands({ insn, local }: { insn: Instruction; local: Set<string> }) {
   const selection = useStore((s) => s.selection);
   const refs = resolveRefs(insn, local);
-  if (refs.length === 0) return <span className="op">{insn.operands}</span>;
   const parts: React.ReactNode[] = [];
   let rest = insn.operands;
-  let key = 0;
+  const key = { n: 0 };
   for (const r of refs) {
     const at = rest.indexOf(r.text);
     if (at < 0) continue;
-    if (at > 0) parts.push(<span key={key++}>{rest.slice(0, at)}</span>);
+    if (at > 0) plainTokens(rest.slice(0, at), parts, key);
     const shown = r.local ? labelFor(r.addr) : r.kind === 'function' ? r.label : r.text;
     const selected = selection?.kind === 'addr' && selection.addr === r.addr;
     parts.push(
       <span
-        key={key++}
+        key={key.n++}
+        data-k={refKey(r)}
         className={`ref ref-${r.local ? 'code' : r.kind}${selected ? ' selected' : ''}`}
-        title={`${r.addr}${r.label ? ` ${r.label}` : ''} — double-click to follow`}
+        title={`${r.addr}${r.label ? ` ${r.label}` : ''} — double-click or Enter to follow`}
         onClick={(e) => {
           e.stopPropagation();
           setCursor(insn.addr, { kind: 'addr', addr: r.addr });
@@ -59,8 +80,38 @@ export function Operands({ insn, local }: { insn: Instruction; local: Set<string
     );
     rest = rest.slice(at + r.text.length);
   }
-  if (rest) parts.push(<span key={key++}>{rest}</span>);
+  if (rest) plainTokens(rest, parts, key);
   return <span className="op">{parts}</span>;
+}
+
+export function Mnemonic({ insn }: { insn: Instruction }) {
+  return (
+    <span className={mnemonicClass(insn)} data-k={`m:${insn.mnemonic}`}>
+      {insn.mnemonic}
+    </span>
+  );
+}
+
+/**
+ * Enter: follow the reference under the cursor. The selected operand if it
+ * belongs to this instruction, else the call/branch target, else the first
+ * referenced address.
+ */
+export function followFrom(insn: Instruction | undefined, local: Set<string>): void {
+  const { selection, byId } = getState();
+  if (selection?.kind === 'function') {
+    const f = byId.get(selection.fnId);
+    if (f) void navigate(f.entry, { fnId: f.id });
+    return;
+  }
+  if (!insn) return;
+  const refs = resolveRefs(insn, local);
+  const sel = selection?.kind === 'addr' ? refs.find((r) => r.addr === selection.addr) : undefined;
+  if (sel) return void navigate(sel.addr, sel.kind === 'data' && !sel.local ? { view: 'hex' } : {});
+  const target = insn.flow.kind !== 'fallthrough' ? insn.flow.targets[0] : undefined;
+  if (target) return void navigate(target);
+  const r = refs[0];
+  if (r) void navigate(r.addr, r.kind === 'data' && !r.local ? { view: 'hex' } : {});
 }
 
 /** Operand text as displayed (labels substituted), for layout. */

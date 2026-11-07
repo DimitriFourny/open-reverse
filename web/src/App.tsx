@@ -28,6 +28,7 @@ import { HexView } from './views/HexView.tsx';
 import { LinearView } from './views/LinearView.tsx';
 import { PseudoView } from './views/PseudoView.tsx';
 import { TypesView } from './views/TypesView.tsx';
+import { HighlightStyle, getUi, openFind, setUi } from './views/codeui.tsx';
 
 function useKeyboard() {
   useEffect(() => {
@@ -39,6 +40,12 @@ function useKeyboard() {
       if ((e.ctrlKey || e.metaKey) && (k === 'p' || k === 'k')) {
         e.preventDefault();
         setState({ dialog: { kind: 'goto' } });
+      } else if ((e.ctrlKey || e.metaKey) && k === 'f') {
+        const main = s.loc?.view === 'linear' || s.loc?.view === 'graph';
+        const pseudo = s.showPseudo && main && !!s.loc?.fnId;
+        if (!main) return;
+        e.preventDefault();
+        openFind(pseudo);
       } else if (e.altKey && k === 'ArrowLeft') back();
       else if (e.altKey && k === 'ArrowRight') forward();
       else if (!plain) return;
@@ -47,7 +54,8 @@ function useKeyboard() {
       else if (k === 'x' || k === 'X') beginXrefs();
       else if (k === ';' || k === '/') beginComment();
       else if (k === 'Escape') {
-        if (s.xrefs) setState({ xrefs: null });
+        if (getUi().find) setUi({ find: null });
+        else if (s.xrefs) setState({ xrefs: null });
         else back();
       } else if (k === ' ') setView(s.loc?.view === 'graph' ? 'linear' : 'graph');
       else if (k === 'Tab') togglePseudo();
@@ -225,7 +233,7 @@ function StatusBar() {
       </span>
       {showToast && <span className={`toast toast-${toast.kind}`}>{toast.text}</span>}
       <span className="spacer" />
-      <span className="dim keys">G go · N rename · X xrefs · ; comment · Space graph · Tab pseudo · H hex · B bytes · Esc back</span>
+      <span className="dim keys">G go · ↑↓ move · Enter follow · Ctrl+F find · N rename · X xrefs · ; comment · Space graph · Tab pseudo · H hex · B bytes · Esc back</span>
     </div>
   );
 }
@@ -354,6 +362,7 @@ export function App() {
         </div>
       )}
       <Dialogs />
+      <HighlightStyle />
       <StatusBar />
     </div>
   );

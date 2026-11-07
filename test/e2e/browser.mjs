@@ -75,6 +75,72 @@ let failures = 0;
     await page.waitForSelector('.user-comment:has-text("persisted comment")', { timeout: 60000 });
     await page.waitForSelector('.pline:has-text("my_max(")', { timeout: 120000 });
   });
+  // Code-view UX (fixture_check: 66 blocks, many branches).
+  const cursorAddr = () => page.locator('.row.cursor .addr, .gline.cursor .addr').first().textContent();
+  await step('linear: branch arrows', async () => {
+    await page.waitForSelector('.arrow-gutter .larrow');
+    const n = await page.locator('.larrow').count();
+    if (n < 3) throw new Error(`only ${n} arrows`);
+  });
+  await step('linear: keyboard navigation', async () => {
+    await page.locator('.row.insn').first().click();
+    const start = await cursorAddr();
+    for (let i = 0; i < 3; i++) await page.keyboard.press('ArrowDown');
+    const third = await page.locator('.row.insn .addr').nth(3).textContent();
+    if ((await cursorAddr()) !== third) throw new Error(`Down x3 landed on ${await cursorAddr()}, want ${third}`);
+    await page.keyboard.press('End');
+    await page.waitForSelector('.row.cursor .mn-ret');
+    await page.keyboard.press('PageUp');
+    await page.keyboard.press('Home');
+    if ((await cursorAddr()) !== start) throw new Error('Home did not return to the entry');
+  });
+  await step('token highlight with register aliases', async () => {
+    await page.locator('.row.insn [data-k="r:ax"]').first().click();
+    const seen = await page.$$eval('.code-scroll [data-k="r:ax"]', (els) => ({
+      lit: els.every((e) => getComputedStyle(e).backgroundColor !== 'rgba(0, 0, 0, 0)'),
+      texts: [...new Set(els.map((e) => e.textContent))],
+    }));
+    if (!seen.lit || seen.texts.length < 2) throw new Error(`highlight ${JSON.stringify(seen)}`);
+    await page.locator('.row.insn .addr').first().click();
+    if (await page.locator('style', { hasText: 'data-k' }).count()) throw new Error('click on a line did not clear the highlight');
+  });
+  await step('Enter follows a call, Esc returns', async () => {
+    await page.locator('.row.insn', { has: page.locator('.mn-call') }).first().click();
+    await page.keyboard.press('Enter');
+    await page.waitForSelector('.side-item.active:has-text("fixture_arithmetic")', { timeout: 60000 });
+    await page.keyboard.press('Escape');
+    await page.waitForSelector('.side-item.active:has-text("fixture_check")', { timeout: 60000 });
+  });
+  await step('find in disassembly and pseudocode', async () => {
+    await page.locator('.row.insn').first().click();
+    await page.keyboard.press('Control+f');
+    await page.keyboard.type('cmp');
+    await page.waitForFunction(() => /^\d+\/\d+$/.test(document.querySelector('.pane-main .find-count')?.textContent ?? ''));
+    await page.keyboard.press('Enter');
+    await page.waitForSelector('.row.cursor .mn:text-is("cmp")');
+    await page.keyboard.press('Escape');
+    await page.waitForSelector('.find-bar', { state: 'detached' });
+    await page.locator('.pline').nth(5).click();
+    await page.keyboard.press('Control+f');
+    await page.keyboard.type('return');
+    await page.waitForFunction(() => /^\d+\/\d+$/.test(document.querySelector('.pane-pseudo .find-count')?.textContent ?? ''));
+    await page.keyboard.press('Escape');
+  });
+  await step('graph: minimap, edge highlight, keys', async () => {
+    await page.locator('.row.insn').first().click();
+    await page.keyboard.press('Space');
+    await page.waitForSelector('.minimap');
+    const before = await cursorAddr();
+    for (let i = 0; i < 25; i++) await page.keyboard.press('ArrowDown');
+    if ((await cursorAddr()) === before) throw new Error('Down did not move in the graph');
+    await page.waitForSelector('.edge.hot', { state: 'attached' });
+    const mm = await page.locator('.minimap').boundingBox();
+    const t0 = await page.locator('.graph-canvas').getAttribute('style');
+    await page.mouse.click(mm.x + mm.width / 2, mm.y + mm.height - 3);
+    if ((await page.locator('.graph-canvas').getAttribute('style')) === t0) throw new Error('minimap click did not pan');
+    await page.keyboard.press('Space');
+    await page.waitForSelector('.row.insn');
+  });
   await step('graph + hex + xrefs', async () => {
     await page.keyboard.press('Space');
     await page.waitForSelector('.gnode');

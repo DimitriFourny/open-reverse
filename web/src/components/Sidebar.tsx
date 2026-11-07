@@ -20,9 +20,14 @@ function VList({ items, activeKey }: { items: Item[]; activeKey: string | null }
   const ref = useRef<HTMLDivElement>(null);
   const virt = useVirtualizer({ count: items.length, getScrollElement: () => ref.current, estimateSize: () => ROW_H, overscan: 20 });
   const activeIndex = activeKey ? items.findIndex((i) => i.key === activeKey) : -1;
+  // Scroll to the active item when it changes (or first appears), not when the
+  // list is re-sorted, filtered or refreshed by background discovery.
+  const scrolledTo = useRef<string | null>(null);
   useEffect(() => {
-    if (activeIndex >= 0) virt.scrollToIndex(activeIndex, { align: 'auto' });
-  }, [activeIndex, virt]);
+    if (activeIndex < 0 || scrolledTo.current === activeKey) return;
+    scrolledTo.current = activeKey;
+    virt.scrollToIndex(activeIndex, { align: 'auto' });
+  }, [activeKey, activeIndex, virt]);
   return (
     <div ref={ref} className="side-list">
       <div style={{ height: virt.getTotalSize(), position: 'relative' }}>
