@@ -6,8 +6,10 @@ OpenDecomp loads, disassembles and decompiles the binary, and OpenReverse runs i
 
 ## Features
 
-- **Linear disassembly** with branch labels (`loc_…`), call targets shown by function name, string references as auto-comments, and optional instruction bytes.
-- **Control-flow graph**: block layout from dagre, true/false/unconditional edge colors, back edges drawn dashed, pan, Ctrl+wheel zoom, and fit-to-view.
+- **Linear disassembly** with branch labels (`loc_…`), jump arrows in a left gutter (nested lanes, conditional/unconditional colors as in the graph, the cursor's arrows emphasized), call targets shown by function name, string references as auto-comments, and optional instruction bytes.
+- **Control-flow graph**: block layout from dagre, true/false/unconditional edge colors, back edges drawn dashed, the cursor block's outgoing edges emphasized, a minimap (click or drag to move), pan, Ctrl+wheel zoom, and fit-to-view.
+- **Token highlighting**: click a register, number, label or name to highlight every occurrence in the disassembly, graph and pseudocode. Registers match their aliases (`rax`/`eax`/`ax`/`al`, `x0`/`w0`, `v0`/`q0`/`d0`/`s0`), numbers match in hex or decimal.
+- **Find** (Ctrl+F) in the disassembly or pseudocode pane, with every match highlighted.
 - **Pseudo-C / pseudo-Python** next to the disassembly, linked in both directions. Click a statement to highlight its instructions; move the cursor in the disassembly to highlight the statements it produced. This uses OpenDecomp's emission mappings. Language, `proven`/`likely` inference and `source`/`checked` view are selectable.
 - **Navigation**: double-click to follow references, back/forward history, go to an address or function name with fuzzy matching, and the location kept in the URL hash so a reload keeps your place.
 - **Function, string, symbol and section lists**, all filterable and virtualized so they stay fast on large binaries.
@@ -93,12 +95,17 @@ npm run preview        # serve web/dist locally
 | `N`                | Rename the selected function, call target or global |
 | `X`                | Cross-references to the selection (or current function) |
 | `;`                | Comment at the cursor                             |
+| `↑` `↓`            | Previous / next instruction (in the graph, across to the fall-through block) |
+| `PgUp` `PgDn`, `Home` `End` | Page up / down (linear), first / last instruction |
+| `Enter`            | Follow the selected operand, else the call/branch target under the cursor |
+| `Ctrl+F`           | Find in the last clicked pane; `Enter` / `Shift+Enter` next / previous, `Esc` closes |
 | `Space`            | Toggle linear / graph                             |
 | `Tab`              | Toggle the pseudocode pane                        |
 | `H`                | Toggle hex view                                   |
 | `B`                | Toggle instruction bytes                          |
-| `Esc`, `Alt+←`     | Back (Esc first closes the xrefs panel)           |
+| `Esc`, `Alt+←`     | Back (Esc first closes the find bar, then the xrefs panel) |
 | `Alt+→`            | Forward                                           |
+| click              | Move the cursor; on a token, highlight its occurrences |
 | double-click       | Follow a reference                                |
 
 ## Layout
@@ -122,5 +129,9 @@ vendor/open-decomp               OpenDecomp (git submodule, unmodified)
 
 ## Tests
 
-- `npm test` runs unit tests under Node: the shims (VFS/fs, SQLite, crypto, zstd and v8) and the ZIP/project archive encoder and validator.
-- `npm run test:e2e` drives the built site in Chromium. Start the site first with `npm run preview -- --port 5199`, and install the browser with `npm i -D playwright && npx playwright install chromium`. It covers upload, decompilation, renames propagating to callers, comments, persistence across a reload, graph/hex/xrefs, Mach-O and PE, a stripped binary with background discovery, and data in/out: pseudocode export (and cancel), archive export, binary download, an import conflict, and an archive imported into a fresh browser profile keeping the rename, the comment and the cached decompilation, then a project reset. `PLAYWRIGHT_PATH` points it at a playwright package installed elsewhere.
+- `npm test` runs unit tests under Node: the shims (VFS/fs, SQLite, crypto, zstd, v8), the ZIP/project archive encoder and validator, and the token keys used for highlighting.
+- `npm run test:e2e` drives the built site in Chromium. Start the site first with `npm run preview -- --port 5199`, and install the browser with `npm i -D playwright && npx playwright install chromium` (or point `PLAYWRIGHT_PATH` at a playwright package installed elsewhere). It covers:
+  - upload, decompilation, renames propagating to callers, comments and persistence across a reload;
+  - branch arrows, keyboard navigation, token highlighting, find, the graph minimap, and the graph, hex and xrefs views;
+  - Mach-O and PE, and a stripped binary with background discovery;
+  - data in and out: pseudocode export (and cancel), archive export, binary download, an import conflict, and an archive imported into a fresh browser profile keeping the rename, the comment and the cached decompilation, then a project reset.

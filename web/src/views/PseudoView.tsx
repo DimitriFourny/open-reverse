@@ -5,6 +5,8 @@ import { useEffect, useMemo, useRef } from 'react';
 import type { Decompilation, Mapping } from '../api.ts';
 import { getState, navigate, setState, useStore } from '../store.ts';
 import { splitLines, tokenize, type Token } from '../syntax.ts';
+import { FindBar, onCodeMouseDown, useDomFind } from './codeui.tsx';
+import { pseudoKey } from './tokens.ts';
 
 /** Most specific mapping containing a text offset: shortest span, then fewest addresses. */
 function mappingAt(mappings: Mapping[], offset: number, decl: { start: number; end: number } | null): Mapping | null {
@@ -40,6 +42,7 @@ export function PseudoView({ decomp }: { decomp: Decompilation }) {
   const byName = useStore((s) => s.byName);
   const selection = useStore((s) => s.selection);
   const scrollRef = useRef<HTMLDivElement>(null);
+  const linesRef = useRef<HTMLDivElement>(null);
 
   const lines = useMemo(() => splitLines(tokenize(decomp.text, decomp.language)), [decomp]);
 
@@ -73,31 +76,43 @@ export function PseudoView({ decomp }: { decomp: Decompilation }) {
     });
   };
 
+  const find = useDomFind(linesRef, 'pseudo', '.ptext', false, lines, (r) => {
+    const el = r.startContainer.parentElement;
+    const box = scrollRef.current?.getBoundingClientRect();
+    const rr = r.getBoundingClientRect();
+    if (el && box && (rr.top < box.top || rr.bottom > box.bottom || rr.left < box.left || rr.right > box.right)) el.scrollIntoView({ block: 'center', inline: 'nearest' });
+  }, () => linesRef.current?.querySelector('.tok.hot') ?? null);
+
   return (
-    <div ref={scrollRef} className="code-scroll pseudo">
-      <div className="pseudo-lines">
-        {lines.map((line, n) => (
-          <div key={n} className="pline">
-            <span className="lineno">{n + 1}</span>
-            <span className="ptext">
-              {line.map((t) => {
-                const fn = t.kind === 'call' || t.kind === 'ident' ? byName.get(t.text) : undefined;
-                const sel = fn && selection?.kind === 'function' && selection.fnId === fn.id;
-                return (
-                  <span
-                    key={t.start}
-                    className={`tok t-${fn ? 'fn' : t.kind}${hot(t) ? ' hot' : ''}${sel ? ' selected' : ''}`}
-                    onClick={() => onToken(t)}
-                    onDoubleClick={fn ? () => void navigate(fn.entry) : undefined}
-                    title={fn ? `${fn.name} @ ${fn.entry} — double-click to open` : undefined}
-                  >
-                    {t.text}
-                  </span>
-                );
-              })}
-            </span>
-          </div>
-        ))}
+    <div className="code-wrap" onMouseDown={onCodeMouseDown('pseudo', '.pline')}>
+      <FindBar pane="pseudo" count={find.count} index={find.index} onStep={find.step} />
+      <div ref={scrollRef} className="code-scroll pseudo">
+        <div ref={linesRef} className="pseudo-lines">
+          {lines.map((line, n) => (
+            <div key={n} className="pline">
+              <span className="lineno">{n + 1}</span>
+              <span className="ptext">
+                {line.map((t) => {
+                  const fn = t.kind === 'call' || t.kind === 'ident' ? byName.get(t.text) : undefined;
+                  const sel = fn && selection?.kind === 'function' && selection.fnId === fn.id;
+                  const k = pseudoKey(t.kind, t.text);
+                  return (
+                    <span
+                      key={t.start}
+                      data-k={k ?? undefined}
+                      className={`tok t-${fn ? 'fn' : t.kind}${hot(t) ? ' hot' : ''}${sel ? ' selected' : ''}`}
+                      onClick={() => onToken(t)}
+                      onDoubleClick={fn ? () => void navigate(fn.entry) : undefined}
+                      title={fn ? `${fn.name} @ ${fn.entry} — double-click to open` : undefined}
+                    >
+                      {t.text}
+                    </span>
+                  );
+                })}
+              </span>
+            </div>
+          ))}
+        </div>
       </div>
     </div>
   );
