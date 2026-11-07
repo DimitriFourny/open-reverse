@@ -1,0 +1,3 @@
+[submodule "vendor/open-decomp"]
+	path = vendor/open-decomp
+	url = https://github.com/DimitriFourny/open-decomp

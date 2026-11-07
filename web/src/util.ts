@@ -1,0 +1,43 @@
+export function canon(hex: string): string {
+  const t = hex.trim().toLowerCase();
+  const v = t.endsWith('h') && !t.startsWith('0x') ? BigInt(`0x${t.slice(0, -1)}`) : BigInt(t.startsWith('0x') ? t : `0x${t}`);
+  return `0x${v.toString(16)}`;
+}
+
+/** Parse what a user types in "Go to": hex with or without 0x / h suffix. */
+export function parseAddress(text: string): string | null {
+  const t = text.trim().toLowerCase();
+  if (/^(0x)?[0-9a-f]{1,16}$/.test(t) || /^[0-9a-f]{1,16}h$/.test(t)) return canon(t);
+  return null;
+}
+
+/** Fixed-width address column, e.g. 0000000000401a90 → 00401a90 for small images. */
+export function padAddr(addr: string, width = 8): string {
+  return addr.slice(2).padStart(width, '0');
+}
+
+export function addrWidth(addressBits: number | undefined, sample?: string): number {
+  if (sample && sample.length - 2 > 8) return 16;
+  return addressBits === 32 ? 8 : sample && sample.length - 2 <= 8 ? 8 : 12;
+}
+
+export function addHex(addr: string, delta: number): string {
+  return `0x${(BigInt(addr) + BigInt(delta)).toString(16)}`;
+}
+
+export function fmtSize(n: number): string {
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KiB`;
+  return `${(n / 1024 / 1024).toFixed(1)} MiB`;
+}
+
+export function cmpAddr(a: string, b: string): number {
+  const x = BigInt(a);
+  const y = BigInt(b);
+  return x < y ? -1 : x > y ? 1 : 0;
+}
+
+export function isEditableTarget(t: EventTarget | null): boolean {
+  const el = t as HTMLElement | null;
+  return !!el && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' || el.tagName === 'SELECT' || el.isContentEditable);
+}

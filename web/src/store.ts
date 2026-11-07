@@ -1,0 +1,549 @@
+// Application state: one module-level store, read with useStore(selector).
+
+import { useSyncExternalStore } from 'react';
+import {
+  api,
+  type BinaryRecord,
+  type Decompilation,
+  type DecompileOptions,
+  type Discovery,
+  type FunctionSummary,
+  type ImageInfo,
+  type Listing,
+  type Section,
+  type StringItem,
+  type SymbolItem,
+  type Xref,
+} from './api.ts';
+import { canon } from './util.ts';
+
+export type ViewMode = 'linear' | 'graph' | 'hex' | 'types';
+export type SidebarTab = 'functions' | 'strings' | 'symbols' | 'sections';
+
+export interface Location {
+  fnId: string | null;
+  addr: string;
+  view: ViewMode;
+}
+
+/** What N (rename) and X (xrefs) act on. */
+export type Selection =
+  | { kind: 'function'; fnId: string }
+  | { kind: 'addr'; addr: string };
+
+export type Dialog =
+  | { kind: 'goto' }
+  | { kind: 'rename'; target: { id?: string; addr?: string }; current: string; what: string }
+  | { kind: 'comment'; addr: string; current: string }
+  | { kind: 'open' };
+
+export interface Async<T> {
+  status: 'idle' | 'loading' | 'ready' | 'error';
+  data: T | null;
+  error: string | null;
+}
+
+const idle = <T,>(): Async<T> => ({ status: 'idle', data: null, error: null });
+
+export interface State {
+  binaries: BinaryRecord[];
+  bid: string | null;
+  info: ImageInfo | null;
+  openError: string | null;
+  functions: FunctionSummary[];
+  byId: Map<string, FunctionSummary>;
+  byEntry: Map<string, FunctionSummary>;
+  byName: Map<string, FunctionSummary>;
+  revision: number;
+  indexState: string;
+  discovery: Discovery | null;
+  loc: Location | null;
+  history: Location[];
+  future: Location[];
+  showPseudo: boolean;
+  showBytes: boolean;
+  options: DecompileOptions;
+  listing: Async<Listing>;
+  decomp: Async<Decompilation>;
+  comments: Record<string, string>;
+  selection: Selection | null;
+  /** Instructions highlighted from a pseudo-code click. */
+  linked: Set<string>;
+  xrefs: { title: string; status: 'loading' | 'ready' | 'error'; items: Xref[]; error: string | null } | null;
+  dialog: Dialog | null;
+  sidebarTab: SidebarTab;
+  strings: Async<StringItem[]>;
+  symbols: Async<SymbolItem[]>;
+  sections: Async<Section[]>;
+  types: Async<{ text: string; state: string }>;
+  toast: { text: string; kind: 'info' | 'error'; at: number } | null;
+}
+
+const PREFS_KEY = 'open-reverse.prefs';
+function loadPrefs(): Partial<Pick<State, 'showPseudo' | 'showBytes' | 'options'>> {
+  try {
+    return JSON.parse(localStorage.getItem(PREFS_KEY) ?? '{}');
+  } catch {
+    return {};
+  }
+}
+
+const prefs = loadPrefs();
+
+let state: State = {
+  binaries: [],
+  bid: null,
+  info: null,
+  openError: null,
+  functions: [],
+  byId: new Map(),
+  byEntry: new Map(),
+  byName: new Map(),
+  revision: 0,
+  indexState: 'complete',
+  discovery: null,
+  loc: null,
+  history: [],
+  future: [],
+  showPseudo: prefs.showPseudo ?? true,
+  showBytes: prefs.showBytes ?? false,
+  options: { language: 'c-like', inference: 'proven', view: 'source', ...prefs.options },
+  listing: idle(),
+  decomp: idle(),
+  comments: {},
+  selection: null,
+  linked: new Set(),
+  xrefs: null,
+  dialog: null,
+  sidebarTab: 'functions',
+  strings: idle(),
+  symbols: idle(),
+  sections: idle(),
+  types: idle(),
+  toast: null,
+};
+
+const listeners = new Set<() => void>();
+
+export function getState(): State {
+  return state;
+}
+
+export function setState(patch: Partial<State> | ((s: State) => Partial<State>)): void {
+  const next = typeof patch === 'function' ? patch(state) : patch;
+  state = { ...state, ...next };
+  if ('showPseudo' in next || 'showBytes' in next || 'options' in next) {
+    try {
+      localStorage.setItem(PREFS_KEY, JSON.stringify({ showPseudo: state.showPseudo, showBytes: state.showBytes, options: state.options }));
+    } catch {
+      // Preferences are a convenience only.
+    }
+  }
+  for (const l of listeners) l();
+}
+
+export function useStore<T>(selector: (s: State) => T): T {
+  return useSyncExternalStore(
+    (l) => {
+      listeners.add(l);
+      return () => listeners.delete(l);
+    },
+    () => selector(state),
+  );
+}
+
+// ------------------------------------------------------------------ helpers
+
+export function toast(text: string, kind: 'info' | 'error' = 'info'): void {
+  setState({ toast: { text, kind, at: Date.now() } });
+}
+
+function errorText(e: unknown): string {
+  return e instanceof Error ? e.message : String(e);
+}
+
+const listingCache = new Map<string, Listing>();
+const decompCache = new Map<string, Decompilation>();
+let decompAbort: AbortController | null = null;
+let pollTimer: ReturnType<typeof setTimeout> | null = null;
+
+function writeHash(): void {
+  const { bid, loc } = state;
+  const hash = bid ? `#/b/${bid}${loc ? `/${loc.addr}${loc.view !== 'linear' ? `/${loc.view}` : ''}` : ''}` : '#/';
+  if (location.hash !== hash) history.replaceState(null, '', hash);
+}
+
+export function parseHash(): { bid: string | null; addr: string | null; view: ViewMode | null } {
+  const m = /^#\/b\/([0-9a-f]{16})(?:\/(0x[0-9a-f]+))?(?:\/(linear|graph|hex|types))?$/.exec(location.hash);
+  return { bid: m?.[1] ?? null, addr: m?.[2] ?? null, view: (m?.[3] as ViewMode | undefined) ?? null };
+}
+
+// ------------------------------------------------------------------ binaries
+
+export async function refreshBinaries(): Promise<void> {
+  try {
+    const { binaries } = await api.binaries();
+    setState({ binaries });
+  } catch (e) {
+    toast(errorText(e), 'error');
+  }
+}
+
+export async function uploadAndOpen(file: File): Promise<void> {
+  try {
+    toast(`Uploading ${file.name}…`);
+    const record = await api.upload(file);
+    await refreshBinaries();
+    await openBinary(record.id);
+  } catch (e) {
+    toast(errorText(e), 'error');
+  }
+}
+
+export async function deleteBinary(bid: string): Promise<void> {
+  await api.remove(bid);
+  if (state.bid === bid) closeBinary();
+  await refreshBinaries();
+}
+
+export function closeBinary(): void {
+  if (pollTimer) clearTimeout(pollTimer);
+  listingCache.clear();
+  decompCache.clear();
+  setState({
+    bid: null,
+    info: null,
+    openError: null,
+    functions: [],
+    byId: new Map(),
+    byEntry: new Map(),
+    byName: new Map(),
+    loc: null,
+    history: [],
+    future: [],
+    listing: idle(),
+    decomp: idle(),
+    comments: {},
+    selection: null,
+    linked: new Set(),
+    xrefs: null,
+    strings: idle(),
+    symbols: idle(),
+    sections: idle(),
+    types: idle(),
+  });
+  writeHash();
+}
+
+export async function openBinary(bid: string, at?: { addr: string | null; view: ViewMode | null }): Promise<void> {
+  closeBinary();
+  setState({ bid, openError: null });
+  try {
+    const info = await api.info(bid);
+    if (getState().bid !== bid) return;
+    setState({ info });
+    await loadFunctions();
+    const { comments } = await api.comments(bid);
+    setState({ comments });
+    const target = at?.addr ?? pickStart();
+    if (target) await navigate(target, { view: at?.view ?? 'linear', replace: true });
+    schedulePoll();
+  } catch (e) {
+    setState({ openError: errorText(e) });
+  }
+}
+
+function pickStart(): string | null {
+  const { byName, info, functions } = state;
+  for (const name of ['main', '_main', 'wmain', 'WinMain', 'wWinMain', 'DllMain']) {
+    const f = byName.get(name);
+    if (f) return f.entry;
+  }
+  const entry = info?.image.entry_points[0]?.value;
+  if (entry) return canon(entry);
+  return functions[0]?.entry ?? null;
+}
+
+async function loadFunctions(): Promise<void> {
+  const bid = state.bid;
+  if (!bid) return;
+  const r = await api.functions(bid);
+  if (state.bid !== bid) return;
+  const byName = new Map<string, FunctionSummary>();
+  for (const f of r.functions) {
+    byName.set(f.name, f);
+    if (f.originalName && !byName.has(f.originalName)) byName.set(f.originalName, f);
+  }
+  // Mach-O symbols carry a leading underscore that the pseudocode's C spelling drops.
+  for (const f of r.functions) {
+    for (const n of [f.name, f.originalName]) if (n?.startsWith('_') && !byName.has(n.slice(1))) byName.set(n.slice(1), f);
+  }
+  setState({
+    functions: r.functions,
+    byId: new Map(r.functions.map((f) => [f.id, f])),
+    byEntry: new Map(r.functions.map((f) => [f.entry, f])),
+    byName,
+    revision: r.revision,
+    indexState: r.indexState,
+    discovery: r.discovery,
+  });
+}
+
+/** Poll while background function discovery runs. */
+function schedulePoll(): void {
+  if (pollTimer) clearTimeout(pollTimer);
+  if (state.discovery?.state !== 'running') return;
+  pollTimer = setTimeout(async () => {
+    const before = state.revision;
+    try {
+      await loadFunctions();
+    } catch {
+      // Retry on the next tick.
+    }
+    if (state.revision !== before) await reloadCurrent();
+    if (state.discovery?.state === 'failed') toast(`Function discovery stopped: ${state.discovery.message}`, 'error');
+    schedulePoll();
+  }, 2000);
+}
+
+// ---------------------------------------------------------------- navigation
+
+function sameLoc(a: Location | null, b: Location): boolean {
+  return !!a && a.fnId === b.fnId && a.addr === b.addr && a.view === b.view;
+}
+
+/**
+ * Go to an address: the function containing it (or the hex view when no
+ * function does). Pushes the previous location on the history stack.
+ */
+export async function navigate(
+  addr: string,
+  opts: { view?: ViewMode; replace?: boolean; fnId?: string } = {},
+): Promise<void> {
+  const bid = state.bid;
+  if (!bid) return;
+  const a = canon(addr);
+  let fnId = opts.fnId ?? null;
+  let view = opts.view ?? (state.loc?.view === 'hex' || state.loc?.view === 'types' ? 'linear' : (state.loc?.view ?? 'linear'));
+  if (!fnId && view !== 'hex') {
+    const cur = state.listing.data;
+    if (cur && cur.instructions.some((i) => i.addr === a)) fnId = cur.function.id;
+    else fnId = state.byEntry.get(a)?.id ?? null;
+    if (!fnId) {
+      try {
+        fnId = (await api.functionAt(bid, a)).function?.id ?? null;
+      } catch {
+        fnId = null;
+      }
+    }
+    if (!fnId) view = 'hex';
+  }
+  const loc: Location = { fnId: fnId ?? state.loc?.fnId ?? null, addr: a, view };
+  setState((s) => ({
+    loc,
+    history: opts.replace || !s.loc || sameLoc(s.loc, loc) ? s.history : [...s.history.slice(-199), s.loc],
+    future: opts.replace ? s.future : [],
+    selection: null,
+    linked: new Set(),
+  }));
+  writeHash();
+  await loadCurrent();
+}
+
+/** Move the cursor within the current view without a history entry. */
+export function setCursor(addr: string, selection: Selection | null = null): void {
+  setState((s) => (s.loc ? { loc: { ...s.loc, addr: canon(addr) }, selection, linked: new Set() } : {}));
+  writeHash();
+}
+
+export function setView(view: ViewMode): void {
+  if (!state.loc) return;
+  setState((s) => ({ loc: { ...s.loc!, view } }));
+  writeHash();
+  void loadCurrent();
+}
+
+export function back(): void {
+  const prev = state.history.at(-1);
+  if (!prev) return;
+  setState((s) => ({ loc: prev, history: s.history.slice(0, -1), future: s.loc ? [s.loc, ...s.future] : s.future, selection: null, linked: new Set() }));
+  writeHash();
+  void loadCurrent();
+}
+
+export function forward(): void {
+  const next = state.future[0];
+  if (!next) return;
+  setState((s) => ({ loc: next, future: s.future.slice(1), history: s.loc ? [...s.history, s.loc] : s.history, selection: null, linked: new Set() }));
+  writeHash();
+  void loadCurrent();
+}
+
+// ---------------------------------------------------------------- loading
+
+async function loadCurrent(): Promise<void> {
+  const { bid, loc } = state;
+  if (!bid || !loc) return;
+  if (loc.view === 'types') void loadTypes();
+  if (!loc.fnId) {
+    setState({ listing: idle(), decomp: idle() });
+    return;
+  }
+  const fnId = loc.fnId;
+  const key = `${fnId}@${state.revision}`;
+  const cached = listingCache.get(key);
+  if (cached) {
+    if (state.listing.data !== cached) setState({ listing: { status: 'ready', data: cached, error: null } });
+  } else {
+    setState((s) => ({ listing: { status: 'loading', data: s.listing.data?.function.id === fnId ? s.listing.data : null, error: null } }));
+    try {
+      const listing = await api.listing(bid, fnId);
+      listingCache.set(key, listing);
+      if (state.loc?.fnId === fnId) setState({ listing: { status: 'ready', data: listing, error: null } });
+    } catch (e) {
+      if (state.loc?.fnId === fnId) setState({ listing: { status: 'error', data: null, error: errorText(e) } });
+    }
+  }
+  if (state.showPseudo) void loadDecompilation();
+}
+
+export async function loadDecompilation(): Promise<void> {
+  const { bid, loc, options, revision } = state;
+  if (!bid || !loc?.fnId) return;
+  const fnId = loc.fnId;
+  const key = `${fnId}@${revision}@${options.language}/${options.inference}/${options.view}`;
+  const cached = decompCache.get(key);
+  if (cached) {
+    if (state.decomp.data !== cached) setState({ decomp: { status: 'ready', data: cached, error: null } });
+    return;
+  }
+  if (state.decomp.status === 'loading' && (state.decomp as Async<Decompilation> & { key?: string }).key === key) return;
+  decompAbort?.abort();
+  const abort = new AbortController();
+  decompAbort = abort;
+  setState({ decomp: Object.assign({ status: 'loading' as const, data: state.decomp.data?.function.id === fnId ? state.decomp.data : null, error: null }, { key }) });
+  try {
+    const d = await api.decompile(bid, fnId, options, abort.signal);
+    decompCache.set(key, d);
+    if (decompAbort === abort) setState({ decomp: { status: 'ready', data: d, error: null } });
+  } catch (e) {
+    if (abort.signal.aborted) return;
+    if (decompAbort === abort) setState({ decomp: { status: 'error', data: null, error: errorText(e) } });
+  }
+}
+
+async function reloadCurrent(): Promise<void> {
+  await loadCurrent();
+}
+
+export function setOptions(patch: Partial<DecompileOptions>): void {
+  setState((s) => ({ options: { ...s.options, ...patch } }));
+  void loadDecompilation();
+}
+
+export function togglePseudo(): void {
+  setState((s) => ({ showPseudo: !s.showPseudo }));
+  if (state.showPseudo) void loadDecompilation();
+}
+
+export async function loadTypes(force = false): Promise<void> {
+  const bid = state.bid;
+  if (!bid || (!force && state.types.status !== 'idle')) return;
+  setState({ types: { status: 'loading', data: null, error: null } });
+  try {
+    setState({ types: { status: 'ready', data: await api.types(bid), error: null } });
+  } catch (e) {
+    setState({ types: { status: 'error', data: null, error: errorText(e) } });
+  }
+}
+
+export async function loadSidebar(tab: SidebarTab): Promise<void> {
+  const bid = state.bid;
+  if (!bid || tab === 'functions' || state[tab].status !== 'idle') return;
+  setState({ [tab]: { status: 'loading', data: null, error: null } } as Partial<State>);
+  try {
+    const data =
+      tab === 'strings' ? (await api.strings(bid)).strings : tab === 'symbols' ? (await api.symbols(bid)).symbols : (await api.sections(bid)).sections;
+    setState({ [tab]: { status: 'ready', data, error: null } } as Partial<State>);
+  } catch (e) {
+    setState({ [tab]: { status: 'error', data: null, error: errorText(e) } } as Partial<State>);
+  }
+}
+
+// ------------------------------------------------------------ annotations
+
+export async function showXrefs(target: { id?: string; addr?: string }, title: string): Promise<void> {
+  const bid = state.bid;
+  if (!bid) return;
+  setState({ xrefs: { title, status: 'loading', items: [], error: null } });
+  try {
+    const { xrefs } = await api.xrefs(bid, target, 'incoming');
+    setState({ xrefs: { title, status: 'ready', items: xrefs, error: null } });
+  } catch (e) {
+    setState({ xrefs: { title, status: 'error', items: [], error: errorText(e) } });
+  }
+}
+
+export async function rename(target: { id?: string; addr?: string }, name: string): Promise<void> {
+  const bid = state.bid;
+  if (!bid) return;
+  try {
+    await api.rename(bid, target, name);
+    await loadFunctions();
+    setState({ types: idle() });
+    await reloadCurrent();
+    toast(name.trim() ? `Renamed to ${name.trim()}` : 'Name reset');
+  } catch (e) {
+    toast(errorText(e), 'error');
+  }
+}
+
+export async function setComment(addr: string, text: string): Promise<void> {
+  const bid = state.bid;
+  if (!bid) return;
+  try {
+    const { comments } = await api.comment(bid, addr, text);
+    setState({ comments });
+  } catch (e) {
+    toast(errorText(e), 'error');
+  }
+}
+
+/** The rename dialog for the current selection (N). */
+export function beginRename(): void {
+  const { selection, byId, byEntry, loc, listing } = state;
+  let fn: FunctionSummary | undefined;
+  if (selection?.kind === 'function') fn = byId.get(selection.fnId);
+  else if (selection?.kind === 'addr') {
+    fn = byEntry.get(selection.addr);
+    if (!fn && !listing.data?.instructions.some((i) => i.addr === selection.addr)) {
+      setState({ dialog: { kind: 'rename', target: { addr: selection.addr }, current: '', what: `global at ${selection.addr}` } });
+      return;
+    }
+  }
+  fn ??= loc?.fnId ? byId.get(loc.fnId) : undefined;
+  if (!fn) return;
+  setState({ dialog: { kind: 'rename', target: { id: fn.id }, current: fn.name, what: `function at ${fn.entry}` } });
+}
+
+/** Xrefs to the current selection, else to the current function (X). */
+export function beginXrefs(): void {
+  const { selection, byId, byEntry, loc } = state;
+  if (selection?.kind === 'function') {
+    const f = byId.get(selection.fnId);
+    if (f) return void showXrefs({ id: f.id }, `Xrefs to ${f.name}`);
+  }
+  if (selection?.kind === 'addr') {
+    const f = byEntry.get(selection.addr);
+    if (f) return void showXrefs({ id: f.id }, `Xrefs to ${f.name}`);
+    return void showXrefs({ addr: selection.addr }, `Xrefs to ${selection.addr}`);
+  }
+  const f = loc?.fnId ? byId.get(loc.fnId) : undefined;
+  if (f) void showXrefs({ id: f.id }, `Xrefs to ${f.name}`);
+}
+
+export function beginComment(): void {
+  const addr = state.loc?.addr;
+  if (!addr) return;
+  setState({ dialog: { kind: 'comment', addr, current: state.comments[addr] ?? '' } });
+}
