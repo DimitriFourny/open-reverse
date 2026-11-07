@@ -2,7 +2,7 @@
 
 A web interface for reverse engineering native binaries, in the spirit of Binary Ninja, IDA and Ghidra, built on [OpenDecomp](https://github.com/DimitriFourny/open-decomp).
 
-OpenDecomp loads, disassembles and decompiles the binary. OpenReverse adds a browser UI and a small HTTP server that keeps OpenDecomp projects open between requests. It supports what OpenDecomp supports: **Mach-O ARM64, PE x86-64 and ELF x86-64**.
+OpenDecomp loads, disassembles and decompiles the binary, and OpenReverse runs it **entirely client-side**: nothing is uploaded and no server executes anything. It supports what OpenDecomp supports: **Mach-O ARM64, PE x86-64 and ELF x86-64**.
 
 ## Features
 
@@ -18,41 +18,43 @@ OpenDecomp loads, disassembles and decompiles the binary. OpenReverse adds a bro
 - **Comments** on any address.
 - **Stripped binaries**: whole-image function discovery runs in the background, and the function list fills in as it progresses.
 
-## Requirements
+## How it runs
 
-- Node.js **24+** (the server runs TypeScript directly with Node's type stripping, so there is no server build step)
-- Bun **1.4.3**, needed only to build OpenDecomp (`npm i -g bun@1.4.3`)
+**Everything runs in your browser.** OpenReverse is a static site with no backend. The binaries you open never leave the tab:
 
-## Setup
+- OpenDecomp (loaders, decoders, lifters, the decompiler and its SQLite project store) runs in a **Web Worker**.
+- Node built-ins are swapped for browser shims at build time (`web/src/engine/shims/`):
+  - `node:sqlite` uses the official SQLite WASM build, with in-memory databases serialized into the virtual filesystem;
+  - `node:fs` uses an in-memory filesystem persisted to **IndexedDB**;
+  - `node:crypto` uses synchronous SHA-256 from `@noble/hashes`;
+  - `node:v8` uses a structured-clone serializer;
+  - `node:child_process` runs OpenDecomp's project worker in the same thread, keeping its framed protocol.
+- The `iced-x86`, C++, MSVC and Swift demangler WASM modules are bundled as assets.
+- Projects, renames and comments are saved in IndexedDB and are there again after a reload. Delete a binary from the home screen to remove its data.
+- Only one tab at a time owns the projects; a second tab is told to close the first.
+
+The OpenDecomp submodule is not modified. The three source rewrites needed in the browser are in `web/vite.config.ts`:
+- loading `iced-x86` as ESM;
+- giving each in-thread project worker its own `process` object;
+- fetching the C++ demangler WASM.
+
+## Requirements (to build)
+
+- Node.js **24+** and Bun **1.4.3** (`npm i -g bun@1.4.3`), only to build OpenDecomp and the site. Nothing runs on a server.
+- A recent Chromium, Firefox or Safari to use it (Web Workers, WebAssembly, IndexedDB).
+
+## Setup and build
 
 ```sh
 git clone --recurse-submodules <this repo> open-reverse
 cd open-reverse
 npm run setup          # builds vendor/open-decomp, installs dependencies
+npm run build          # static site in web/dist/ (host it anywhere)
+npm run dev            # development: http://localhost:5173 with hot reload
+npm run preview        # serve web/dist locally
 ```
 
-## Run
-
-```sh
-npm run build          # build the web UI into web/dist
-npm start              # http://127.0.0.1:5174
-npm start -- ./app     # also import ./app into the workspace
-```
-
-Open the page, then drop a binary on it or use **Open…**.
-
-For development, `npm run dev` starts the API server in watch mode on :5174 and Vite with hot reload on http://127.0.0.1:5173.
-
-Options (`node server/main.ts --help`):
-
-| Option            | Default                                           |
-| ----------------- | ------------------------------------------------- |
-| `--host HOST`     | `127.0.0.1`                                       |
-| `--port PORT`     | `5174`                                            |
-| `--workspace DIR` | `./workspace` (or `$OPEN_REVERSE_WORKSPACE`)      |
-| `--dev`           | API only; the UI is served by Vite                |
-
-> **Security:** the server has no authentication. Anyone who can reach the port can upload binaries and read their analysis. It listens on loopback by default; put it behind an authenticating proxy before exposing it.
+`web/dist` can be published as-is to any static host (GitHub Pages, S3, …); it uses relative paths.
 
 ## Keyboard
 
@@ -73,36 +75,21 @@ Options (`node server/main.ts --help`):
 ## Layout
 
 ```
-server/            Fastify API (Node 24, TypeScript without a build step)
-  main.ts          CLI entry point
-  app.ts           HTTP routes under /api
-  session.ts       One open binary: OpenDecomp BinarySession + presentation
-  workspace.ts     Uploaded binaries, OpenDecomp projects, comments
-web/               React + Vite UI
-  src/store.ts     App state, navigation history, caches
-  src/views/       Linear, graph, pseudocode, hex and types views
-test/              API tests over OpenDecomp's fixture binaries (npm test)
-vendor/open-decomp OpenDecomp (git submodule)
+web/src/
+  App.tsx, components/, views/   React UI (linear, graph, pseudocode, hex, types)
+  store.ts                       App state, navigation history, caches
+  api.ts                         Typed RPC client to the engine worker
+  engine/
+    worker.ts                    Worker entry: boots WASM + SQLite, serves RPC
+    engine.ts, session.ts        Per-binary OpenDecomp session and presentation
+    workspace.ts, vfs.ts         Binaries/projects in a VFS persisted to IndexedDB
+    shims/                       Browser implementations of the Node built-ins
+test/                            Node unit tests for the shims (npm test)
+test/e2e/browser.mjs             Real-browser end-to-end test (npm run test:e2e)
+vendor/open-decomp               OpenDecomp (git submodule, unmodified)
 ```
 
-The workspace stores each binary at `workspace/binaries/<id>/`. The id is the first 16 hex digits of the binary's SHA-256. Each directory holds a copy of the binary, its OpenDecomp project (`project/`, SQLite) and `comments.json`.
+## Tests
 
-## API
-
-All endpoints are JSON. `:bid` is a workspace binary id and `:fid` an OpenDecomp function entity id.
-
-| Method | Path | |
-| --- | --- | --- |
-| GET | `/api/binaries` | Workspace binaries |
-| POST | `/api/binaries?name=` | Upload (`application/octet-stream` body) |
-| DELETE | `/api/binaries/:bid` | Delete a binary and its project |
-| GET | `/api/b/:bid/info` | Image, target, revision, discovery status |
-| GET | `/api/b/:bid/functions` | All functions |
-| GET | `/api/b/:bid/function-at?addr=` | Function containing an address |
-| GET | `/api/b/:bid/functions/:fid/listing` | Instructions (bytes, resolved operand refs) and CFG blocks |
-| GET | `/api/b/:bid/functions/:fid/decompile?language=&inference=&view=` | Pseudocode plus text-span → address mappings |
-| GET | `/api/b/:bid/xrefs?id=` or `?addr=` | Incoming references |
-| GET | `/api/b/:bid/strings` · `symbols` · `sections` · `headers` · `types` | Image tables |
-| GET | `/api/b/:bid/memory?addr=&length=` | Bytes (at most 64 KiB) |
-| POST | `/api/b/:bid/rename` | `{id \| addr, name}`; an empty name restores the original |
-| POST | `/api/b/:bid/comment` | `{addr, text}`; empty text removes the comment |
+- `npm test` runs unit tests for the shims under Node: VFS/fs, SQLite, crypto, zstd and v8.
+- `npm run test:e2e` drives the built site in Chromium. Start the site first with `npm run preview -- --port 5199`, and install the browser with `npm i -D playwright && npx playwright install chromium`. It covers upload, decompilation, renames propagating to callers, comments, persistence across a reload, graph/hex/xrefs, Mach-O and PE, and a stripped binary with background discovery.

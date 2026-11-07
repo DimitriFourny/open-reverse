@@ -141,51 +141,103 @@ export interface DecompileOptions {
   view: 'source' | 'checked';
 }
 
-async function request<T>(method: string, url: string, body?: unknown, signal?: AbortSignal): Promise<T> {
-  const init: RequestInit = { method, ...(signal ? { signal } : {}) };
-  if (body instanceof Blob) {
-    init.body = body;
-    init.headers = { 'content-type': 'application/octet-stream' };
-  } else if (body !== undefined) {
-    init.body = JSON.stringify(body);
-    init.headers = { 'content-type': 'application/json' };
-  }
-  const res = await fetch(url, init);
-  const text = await res.text();
-  let data: unknown;
-  try {
-    data = text ? JSON.parse(text) : null;
-  } catch {
-    throw new Error(`${res.status} ${res.statusText}`);
-  }
-  if (!res.ok) throw new Error((data as { error?: string } | null)?.error ?? `${res.status} ${res.statusText}`);
-  return data as T;
+// ------------------------------------------------------------ engine RPC
+// Everything runs in a Web Worker in this tab (engine/worker.ts): OpenDecomp,
+// SQLite and the projects in IndexedDB. Nothing is sent to a server.
+
+import type { RpcResponse } from './engine/worker.ts';
+
+type Pending = { resolve: (v: unknown) => void; reject: (e: Error) => void };
+let worker: Worker | null = null;
+let nextId = 1;
+const pending = new Map<number, Pending>();
+let readyState: { resolve: () => void; reject: (e: Error) => void; promise: Promise<void> } | null = null;
+
+function boot(): Worker {
+  if (worker) return worker;
+  let resolve!: () => void;
+  let reject!: (e: Error) => void;
+  const promise = new Promise<void>((a, b) => {
+    resolve = a;
+    reject = b;
+  });
+  readyState = { resolve, reject, promise };
+  worker = new Worker(new URL('./engine/worker.ts', import.meta.url), { type: 'module', name: 'open-reverse-engine' });
+  worker.onmessage = (event: MessageEvent<RpcResponse>) => {
+    const msg = event.data;
+    if ('event' in msg) {
+      if (msg.event === 'ready') readyState?.resolve();
+      else if (msg.event === 'log') console[msg.level](`[engine] ${msg.text}`);
+      else readyState?.reject(new Error(msg.error));
+      return;
+    }
+    const p = pending.get(msg.id);
+    if (!p) return;
+    pending.delete(msg.id);
+    if (msg.ok) p.resolve(msg.value);
+    else p.reject(new Error(msg.error));
+  };
+  worker.onerror = (e) => {
+    const err = new Error(`Analysis engine crashed: ${e.message || 'unknown error'}`);
+    readyState?.reject(err);
+    for (const p of pending.values()) p.reject(err);
+    pending.clear();
+  };
+  return worker;
 }
 
-const b = (bid: string) => `/api/b/${encodeURIComponent(bid)}`;
-const q = (params: Record<string, string>) => new URLSearchParams(params).toString();
+/** Resolves once the engine (WASM, SQLite, workspace) is initialized. */
+export function engineReady(): Promise<void> {
+  boot();
+  return readyState!.promise;
+}
+
+/** Ask the engine to persist pending changes now (e.g. before the page is hidden). */
+export function flushEngine(): void {
+  if (worker) void call('flush', []).catch(() => undefined);
+}
+
+function call<T>(method: string, args: unknown[], signal?: AbortSignal, transfer: Transferable[] = []): Promise<T> {
+  const w = boot();
+  const id = nextId++;
+  return new Promise<T>((resolve, reject) => {
+    if (signal?.aborted) return reject(new DOMException('Aborted', 'AbortError'));
+    pending.set(id, { resolve: resolve as (v: unknown) => void, reject });
+    signal?.addEventListener(
+      'abort',
+      () => {
+        w.postMessage({ cancel: id });
+        pending.delete(id);
+        reject(new DOMException('Aborted', 'AbortError'));
+      },
+      { once: true },
+    );
+    w.postMessage({ id, method, args }, transfer);
+  });
+}
 
 export const api = {
-  binaries: () => request<{ binaries: BinaryRecord[]; open: string[] }>('GET', '/api/binaries'),
-  upload: (file: File) => request<BinaryRecord>('POST', `/api/binaries?${q({ name: file.name })}`, file),
-  remove: (bid: string) => request<{ ok: true }>('DELETE', `/api/binaries/${bid}`),
-  info: (bid: string) => request<ImageInfo>('GET', `${b(bid)}/info`),
+  binaries: () => call<{ binaries: BinaryRecord[]; open: string[] }>('binaries', []),
+  upload: async (file: File) => {
+    const bytes = new Uint8Array(await file.arrayBuffer());
+    return call<BinaryRecord>('upload', [file.name, bytes], undefined, [bytes.buffer]);
+  },
+  remove: (bid: string) => call<{ ok: true }>('remove', [bid]),
+  close: (bid: string) => call<{ ok: true }>('close', [bid]),
+  download: (bid: string) => call<{ name: string; bytes: Uint8Array }>('download', [bid]),
+  info: (bid: string) => call<ImageInfo>('info', [bid]),
   functions: (bid: string) =>
-    request<{ revision: number; indexState: string; discovery: Discovery; functions: FunctionSummary[] }>('GET', `${b(bid)}/functions`),
-  functionAt: (bid: string, addr: string) => request<{ function: FunctionSummary | null }>('GET', `${b(bid)}/function-at?${q({ addr })}`),
-  listing: (bid: string, fid: string) => request<Listing>('GET', `${b(bid)}/functions/${fid}/listing`),
-  decompile: (bid: string, fid: string, o: DecompileOptions, signal?: AbortSignal) =>
-    request<Decompilation>('GET', `${b(bid)}/functions/${fid}/decompile?${q({ ...o })}`, undefined, signal),
-  xrefs: (bid: string, target: { id?: string; addr?: string }, direction = 'incoming') =>
-    request<{ xrefs: Xref[] }>('GET', `${b(bid)}/xrefs?${q({ ...(target.id ? { id: target.id } : { addr: target.addr! }), direction })}`),
-  strings: (bid: string) => request<{ strings: StringItem[] }>('GET', `${b(bid)}/strings`),
-  symbols: (bid: string) => request<{ symbols: SymbolItem[] }>('GET', `${b(bid)}/symbols`),
-  sections: (bid: string) => request<{ sections: Section[] }>('GET', `${b(bid)}/sections`),
-  types: (bid: string) => request<{ text: string; state: string }>('GET', `${b(bid)}/types`),
-  memory: (bid: string, addr: string, length: number) => request<MemoryChunk>('GET', `${b(bid)}/memory?${q({ addr, length: String(length) })}`),
-  comments: (bid: string) => request<{ comments: Record<string, string> }>('GET', `${b(bid)}/comments`),
-  rename: (bid: string, target: { id?: string; addr?: string }, name: string) =>
-    request<{ revision: number }>('POST', `${b(bid)}/rename`, { ...target, name }),
-  comment: (bid: string, addr: string, text: string) =>
-    request<{ comments: Record<string, string> }>('POST', `${b(bid)}/comment`, { addr, text }),
+    call<{ revision: number; indexState: string; discovery: Discovery; functions: FunctionSummary[] }>('functions', [bid]),
+  functionAt: (bid: string, addr: string) => call<{ function: FunctionSummary | null }>('functionAt', [bid, addr]),
+  listing: (bid: string, fid: string) => call<Listing>('listing', [bid, fid]),
+  decompile: (bid: string, fid: string, o: DecompileOptions, signal?: AbortSignal) => call<Decompilation>('decompile', [bid, fid, o], signal),
+  xrefs: (bid: string, target: { id?: string; addr?: string }, direction = 'incoming') => call<{ xrefs: Xref[] }>('xrefs', [bid, target, direction]),
+  strings: (bid: string) => call<{ strings: StringItem[] }>('strings', [bid]),
+  symbols: (bid: string) => call<{ symbols: SymbolItem[] }>('symbols', [bid]),
+  sections: (bid: string) => call<{ sections: Section[] }>('sections', [bid]),
+  types: (bid: string) => call<{ text: string; state: string }>('types', [bid]),
+  memory: (bid: string, addr: string, length: number) => call<MemoryChunk>('memory', [bid, addr, length]),
+  comments: (bid: string) => call<{ comments: Record<string, string> }>('comments', [bid]),
+  rename: (bid: string, target: { id?: string; addr?: string }, name: string) => call<{ revision: number }>('rename', [bid, target, name]),
+  comment: (bid: string, addr: string, text: string) => call<{ comments: Record<string, string> }>('comment', [bid, addr, text]),
 };

@@ -15,4 +15,4 @@ command -v bun >/dev/null 2>&1 || {
 git submodule update --init vendor/open-decomp
 (cd vendor/open-decomp && bun install --frozen-lockfile && bun run build)
 npm install
-echo "Setup complete. Run 'npm run dev' (development) or 'npm run build && npm start'."
+echo "Setup complete. Run 'npm run dev' (development) or 'npm run build' (static site in web/dist)."

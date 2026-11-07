@@ -1,10 +1,10 @@
 // One open binary: an OpenDecomp BinarySession plus the caches and
 // presentation logic the UI needs.
 
-import { createHash } from 'node:crypto';
-import { openBinary, type BinarySession, type ToolInput, type ToolResult } from 'open-decomp/api';
-import type { QueryService } from 'open-decomp';
+import { openBinary, type BinarySession, type ToolInput, type ToolResult } from '@od/api/index.js';
+import type { QueryService } from '@od/service/queries/index.js';
 import { canon, operandConstants } from './hex.ts';
+import { createHash } from './shims/crypto.ts';
 import type { BinaryRecord, Workspace } from './workspace.ts';
 
 /** The largest budget OpenDecomp accepts: discovery of a real binary needs it. */
@@ -512,6 +512,7 @@ export class AnalysisSession {
   async decompile(
     functionId: string,
     options: { language: 'c-like' | 'python-like'; inference: 'proven' | 'likely'; view: 'source' | 'checked' },
+    signal?: AbortSignal,
   ) {
     const fn = await this.functionById(functionId);
     const result = (await this.binary.decompileFunction(functionId, {
@@ -519,6 +520,7 @@ export class AnalysisSession {
       inference: options.inference,
       view: options.view,
       budget: { deadline_ms: 120_000 },
+      ...(signal ? { signal } : {}),
     })) as ToolResult<'function_decompile'>;
     const data = need(result);
     if (data.delivery !== 'inline') throw new ApiError(500, 'Decompilation was not delivered inline');
