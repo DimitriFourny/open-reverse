@@ -771,7 +771,7 @@ select:focus {
 }
 .recent-item {
   display: grid;
-  grid-template-columns: 1fr auto auto auto;
+  grid-template-columns: 1fr auto auto auto auto auto;
   gap: 16px;
   align-items: center;
   padding: 8px 12px;
@@ -788,4 +788,116 @@ select:focus {
   font-family: var(--mono);
   overflow: hidden;
   text-overflow: ellipsis;
+}
+
+/* ------------------------------------------------- data in/out, storage */
+.home-actions {
+  margin-top: 10px;
+  display: flex;
+  justify-content: center;
+  gap: 8px;
+}
+.recent-actions {
+  display: flex;
+  gap: 4px;
+}
+.recent-actions button {
+  padding: 1px 7px;
+  font-size: 12px;
+}
+.usage {
+  font-size: 12px;
+}
+.storage-panel {
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 10px 12px;
+}
+.storage-line {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.storage-meter {
+  margin-top: 8px;
+}
+.storage-hint {
+  margin: 8px 0 0;
+  font-size: 12px;
+}
+.persist-ok {
+  color: var(--fn);
+  font-size: 12px;
+}
+.progress {
+  height: 6px;
+  border-radius: 3px;
+  background: var(--bg-3);
+  overflow: hidden;
+}
+.progress-bar {
+  height: 100%;
+  background: var(--accent-2);
+  transition: width 0.2s;
+}
+.progress.indeterminate .progress-bar {
+  width: 30%;
+  animation: indeterminate 1.2s ease-in-out infinite;
+}
+@keyframes indeterminate {
+  from {
+    transform: translateX(-100%);
+  }
+  to {
+    transform: translateX(340%);
+  }
+}
+.task-panel {
+  position: fixed;
+  right: 16px;
+  bottom: 36px;
+  width: min(420px, calc(100vw - 32px));
+  background: var(--bg-2);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 12px 14px;
+  box-shadow: 0 10px 40px #000a;
+  z-index: 20;
+}
+.task-phase {
+  margin-bottom: 6px;
+}
+.task-detail {
+  margin-top: 6px;
+  font-family: var(--mono);
+  font-size: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.menu {
+  position: relative;
+}
+.export-menu.active {
+  background: var(--bg-hover);
+}
+.menu-pop {
+  position: absolute;
+  right: 0;
+  top: calc(100% + 4px);
+  display: flex;
+  flex-direction: column;
+  min-width: 260px;
+  background: var(--bg-2);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 4px;
+  box-shadow: 0 8px 30px #000a;
+  z-index: 15;
+}
+.menu-item {
+  text-align: left;
+  background: none;
+  border: none;
+  padding: 6px 10px;
 }

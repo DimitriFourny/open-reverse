@@ -24,6 +24,10 @@ export interface LiveSource {
   changed(): boolean;
   renamed(to: string): void;
   unlinked(): void;
+  /** True while a transaction is open: its bytes would not be a consistent snapshot. */
+  busy?(): boolean;
+  /** The current bytes, without marking them as persisted (exports). */
+  peek?(): Uint8Array;
 }
 
 export class FsError extends Error {
@@ -41,6 +45,9 @@ export class FsError extends Error {
 }
 
 const EMPTY = new Uint8Array(0);
+/** Scratch space (e.g. pseudocode exports): kept in memory only, never persisted. */
+const VOLATILE = '/tmp';
+const isVolatile = (p: string) => p === VOLATILE || p.startsWith(`${VOLATILE}/`);
 const DB_NAME = 'open-reverse-fs';
 const STORE = 'files';
 
@@ -155,6 +162,46 @@ export class VFS {
     return [...out];
   }
 
+  isMounted(prefix: string): boolean {
+    const root = this.norm(prefix);
+    return [...this.#mounted].some((m) => root === m || root.startsWith(`${m}/`));
+  }
+
+  /**
+   * Sizes of the files under a directory, by path: the in-memory size for
+   * loaded files (live databases included), else the size stored in IndexedDB.
+   */
+  async usage(prefix: string): Promise<Map<string, number>> {
+    const root = this.norm(prefix);
+    const out = new Map<string, number>();
+    const inside = (p: string) => p.startsWith(`${root}/`);
+    if (this.#persist && !this.isMounted(root)) {
+      const db = await this.#idb();
+      const tx = db.transaction(STORE, 'readonly');
+      await new Promise<void>((resolve, reject) => {
+        const req = tx.objectStore(STORE).openCursor(IDBKeyRange.bound(`${root}/`, `${root}/\uffff`));
+        req.onsuccess = () => {
+          const cursor = req.result;
+          if (!cursor) return resolve();
+          const row = cursor.value as StoredFile;
+          if (row.kind === 'file') out.set(row.path, row.data?.byteLength ?? 0);
+          cursor.continue();
+        };
+        req.onerror = () => reject(req.error);
+      });
+    }
+    for (const [p, n] of this.nodes) if (inside(p) && n.kind === 'file') out.set(p, this.size(p));
+    for (const p of this.#deleted) if (inside(p) && !this.nodes.has(p)) out.delete(p);
+    return out;
+  }
+
+  /** True while a live database under `prefix` has an open transaction. */
+  liveBusy(prefix: string): boolean {
+    const root = this.norm(prefix);
+    for (const [p, src] of this.live) if ((p === root || p.startsWith(`${root}/`)) && src.busy?.()) return true;
+    return false;
+  }
+
   /** Drop an unmounted subtree from memory (after flushing it). */
   async unmount(prefix: string): Promise<void> {
     const root = this.norm(prefix);
@@ -164,6 +211,7 @@ export class VFS {
   }
 
   #touch(path: string): void {
+    if (isVolatile(path)) return;
     this.#dirty.add(path);
     this.#deleted.delete(path);
     this.#schedule();
@@ -225,7 +273,9 @@ export class VFS {
     if (!this.#persist) return;
     const db = await this.#idb();
     const tx = db.transaction(STORE, 'readwrite');
-    tx.objectStore(STORE).delete(IDBKeyRange.bound(root, `${root}/￿`));
+    // Exactly the subtree: a sibling such as `${root}.x` sorts inside [root, root/￿].
+    tx.objectStore(STORE).delete(root);
+    tx.objectStore(STORE).delete(IDBKeyRange.bound(`${root}/`, `${root}/￿`));
     await done(tx);
   }
 
@@ -266,6 +316,20 @@ export class VFS {
     if (n.kind === 'dir') throw new FsError('EISDIR', 'read', p);
     const live = this.live.get(p);
     return live ? live.bytes() : n.data;
+  }
+
+  /** A copy of a file's current bytes that does not affect persistence (live databases included). */
+  snapshot(path: string): Uint8Array {
+    const p = this.norm(path);
+    const live = this.live.get(p);
+    if (live?.peek) return live.peek();
+    if (live) {
+      // A source without peek: take its bytes and persist them on the next flush.
+      const bytes = live.bytes();
+      this.#touch(p);
+      return bytes;
+    }
+    return this.read(p).slice();
   }
 
   readdir(path: string): string[] {
