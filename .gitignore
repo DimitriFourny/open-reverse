@@ -3,3 +3,4 @@ web/dist/
 workspace/
 *.open-decomp/
 *.tsbuildinfo
+.claude/
