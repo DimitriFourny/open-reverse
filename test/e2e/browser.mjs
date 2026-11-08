@@ -54,7 +54,7 @@ let failures = 0;
     await page.waitForSelector('.pline:has-text("fixture_maximum")', { timeout: 120000 });
   });
   await step('rename via N', async () => {
-    await page.locator('.row.insn').first().click();
+    await page.locator('.row.insn.cur-fn').first().click();
     await page.keyboard.press('n');
     await page.fill('.modal-input', 'my_max');
     await page.keyboard.press('Enter');
@@ -75,7 +75,7 @@ let failures = 0;
     await page.locator('.side-item', { hasText: 'fixture_check' }).click();
   });
   await step('comment', async () => {
-    await page.locator('.row.insn').first().click();
+    await page.locator('.row.insn.cur-fn').first().click();
     await page.keyboard.press(';');
     await page.fill('.modal-input', 'persisted comment');
     await page.keyboard.press('Enter');
@@ -101,10 +101,10 @@ let failures = 0;
     if (n < 3) throw new Error(`only ${n} arrows`);
   });
   await step('linear: keyboard navigation', async () => {
-    await page.locator('.row.insn').first().click();
+    await page.locator('.row.insn.cur-fn').first().click();
     const start = await cursorAddr();
     for (let i = 0; i < 3; i++) await page.keyboard.press('ArrowDown');
-    const third = await page.locator('.row.insn .addr').nth(3).textContent();
+    const third = await page.locator('.row.insn.cur-fn .addr').nth(3).textContent();
     if ((await cursorAddr()) !== third) throw new Error(`Down x3 landed on ${await cursorAddr()}, want ${third}`);
     await page.keyboard.press('End');
     await page.waitForSelector('.row.cursor .mn-ret');
@@ -113,24 +113,24 @@ let failures = 0;
     if ((await cursorAddr()) !== start) throw new Error('Home did not return to the entry');
   });
   await step('token highlight with register aliases', async () => {
-    await page.locator('.row.insn [data-k="r:ax"]').first().click();
+    await page.locator('.row.insn.cur-fn [data-k="r:ax"]').first().click();
     const seen = await page.$$eval('.code-scroll [data-k="r:ax"]', (els) => ({
       lit: els.every((e) => getComputedStyle(e).backgroundColor !== 'rgba(0, 0, 0, 0)'),
       texts: [...new Set(els.map((e) => e.textContent))],
     }));
     if (!seen.lit || seen.texts.length < 2) throw new Error(`highlight ${JSON.stringify(seen)}`);
-    await page.locator('.row.insn .addr').first().click();
+    await page.locator('.row.insn.cur-fn .addr').first().click();
     if (await page.locator('style', { hasText: 'data-k' }).count()) throw new Error('click on a line did not clear the highlight');
   });
   await step('Enter follows a call, Esc returns', async () => {
-    await page.locator('.row.insn', { has: page.locator('.mn-call') }).first().click();
+    await page.locator('.row.insn.cur-fn', { has: page.locator('.mn-call') }).first().click();
     await page.keyboard.press('Enter');
     await page.waitForSelector('.side-item.active:has-text("fixture_arithmetic")', { timeout: 60000 });
     await page.keyboard.press('Escape');
     await page.waitForSelector('.side-item.active:has-text("fixture_check")', { timeout: 60000 });
   });
   await step('find in disassembly and pseudocode', async () => {
-    await page.locator('.row.insn').first().click();
+    await page.locator('.row.insn.cur-fn').first().click();
     await page.keyboard.press('Control+f');
     await page.keyboard.type('cmp');
     await page.waitForFunction(() => /^\d+\/\d+$/.test(document.querySelector('.pane-main .find-count')?.textContent ?? ''));
@@ -145,7 +145,7 @@ let failures = 0;
     await page.keyboard.press('Escape');
   });
   await step('graph: minimap, edge highlight, keys', async () => {
-    await page.locator('.row.insn').first().click();
+    await page.locator('.row.insn.cur-fn').first().click();
     await page.keyboard.press('Space');
     await page.waitForSelector('.minimap');
     const before = await cursorAddr();
@@ -185,6 +185,61 @@ let failures = 0;
       await page.waitForSelector('.pline', { timeout: 120000 });
     });
   }
+  await step('whole-image listing: sections, strings, GOT, data keys, rename and xrefs on data', async () => {
+    await page.locator('.brand').click();
+    await page.locator('.recent-item', { hasText: 'macho-arm64-symbols' }).click();
+    await page.waitForSelector('.row.insn', { timeout: 120000 });
+    const cursorText = () => page.locator('.pane-main .row.cursor').first().innerText();
+    const waitCursor = (re, what) =>
+      page.waitForFunction((src) => new RegExp(src).test(document.querySelector('.pane-main .row.cursor')?.textContent ?? ''), re.source, { timeout: 60000 }).catch(async () => {
+        throw new Error(`${what}: cursor line is ${JSON.stringify(await cursorText().catch(() => null))}`);
+      });
+    const goTo = async (target) => {
+      await page.keyboard.press('g');
+      await page.fill('.modal-input', target);
+      await page.waitForTimeout(200);
+      await page.keyboard.press('Enter');
+    };
+    // A string, a GOT slot (named by its import) and a section header.
+    await goTo('_fixture_message');
+    await waitCursor(/db"open-decomp trusted fixture v1", 0/, 'string');
+    await page.waitForSelector('.label-data:text-is("_fixture_message:")');
+    await goTo('0x100004000');
+    await waitCursor(/dq_puts.*import/, 'GOT slot');
+    await page.waitForSelector('.row-section:has-text("section __got")');
+    // Data keys on a zero-fill global: D (byte, then word), * (array), U.
+    await goTo('_fixture_zero_fill');
+    await waitCursor(/0x200 dup\(\?\)/, 'zero fill');
+    await page.keyboard.press('d');
+    await waitCursor(/db0x0$/, 'D');
+    await page.keyboard.press('d');
+    await waitCursor(/dw0x0$/, 'D twice');
+    await page.keyboard.press('*');
+    await page.waitForSelector('.modal-title:has-text("Array of u16")');
+    await page.fill('.modal-input', '4');
+    await page.keyboard.press('Enter');
+    await waitCursor(/dw0x0, 0x0, 0x0, 0x0 ; u16\[4\]/, 'array');
+    await page.keyboard.press('u');
+    await waitCursor(/0x200 dup\(\?\)/, 'U');
+    // N on data renames the global; X lists its references.
+    await page.keyboard.press('n');
+    await page.waitForSelector('.modal-title:has-text("Rename global at 0x100008008")');
+    await page.fill('.modal-input', 'zero_buffer');
+    await page.keyboard.press('Enter');
+    await page.waitForSelector('.label-data:text-is("zero_buffer:")', { timeout: 60000 });
+    await goTo('_fixture_message');
+    await waitCursor(/fixture v1/, 'back to the string');
+    await page.keyboard.press('x');
+    await page.waitForSelector('.xref-table tbody tr:has-text("_fixture_string")');
+    await page.keyboard.press('Escape');
+    // Code is not data, and OpenDecomp cannot create functions.
+    await page.locator('.side-item', { hasText: '_fixture_string' }).click();
+    await waitCursor(/adrp/, 'function entry');
+    await page.keyboard.press('d');
+    await page.waitForSelector('.toast:has-text("OpenDecomp has no way to undefine code")');
+    await page.keyboard.press('p');
+    await page.waitForSelector('.toast:has-text("Cannot create a function")');
+  });
   await step('types: declare, inline errors, signature (Y) with a library type, callers, local rename', async () => {
     await page.locator('.brand').click();
     await page.locator('.recent-item', { hasText: 'macho-arm64-symbols' }).click();

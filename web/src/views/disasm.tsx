@@ -72,7 +72,7 @@ export function Operands({ insn, local }: { insn: Instruction; local: Set<string
         }}
         onDoubleClick={(e) => {
           e.stopPropagation();
-          void navigate(r.addr, r.kind === 'data' && !r.local ? { view: 'hex' } : {});
+          void navigate(r.addr);
         }}
       >
         {shown}
@@ -107,15 +107,15 @@ export function followFrom(insn: Instruction | undefined, local: Set<string>): v
   if (!insn) return;
   const refs = resolveRefs(insn, local);
   const sel = selection?.kind === 'addr' ? refs.find((r) => r.addr === selection.addr) : undefined;
-  if (sel) return void navigate(sel.addr, sel.kind === 'data' && !sel.local ? { view: 'hex' } : {});
+  if (sel) return void navigate(sel.addr);
   const selResolved = selection?.kind === 'addr' ? commentTargets(insn).find((t) => t.addr === selection.addr) : undefined;
-  if (selResolved) return void follow(selResolved.addr, selResolved.kind);
+  if (selResolved) return void navigate(selResolved.addr);
   const target = insn.flow.kind !== 'fallthrough' ? insn.flow.targets[0] : undefined;
   if (target) return void navigate(target);
   const r = refs[0];
-  if (r) return void navigate(r.addr, r.kind === 'data' && !r.local ? { view: 'hex' } : {});
+  if (r) return void navigate(r.addr);
   const t = commentTargets(insn).find((x) => x.addr);
-  if (t) void follow(t.addr, t.kind);
+  if (t) void navigate(t.addr);
 }
 
 /** Operand text as displayed (labels substituted), for layout. */
@@ -170,7 +170,7 @@ export function AutoComment({ insn }: { insn: Instruction }) {
               }}
               onDoubleClick={(e) => {
                 e.stopPropagation();
-                void follow(t.addr, t.kind);
+                void navigate(t.addr);
               }}
             >
               {text}
@@ -180,10 +180,6 @@ export function AutoComment({ insn }: { insn: Instruction }) {
       })}
     </>
   );
-}
-
-function follow(addr: string, kind: string): Promise<void> {
-  return navigate(addr, kind === 'data' || kind === 'string' || kind === 'import' ? { view: 'hex' } : {});
 }
 
 

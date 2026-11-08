@@ -15,6 +15,7 @@ import {
   type SymbolItem,
   type TypesInfo,
   type Xref,
+  type DataAction,
 } from './api.ts';
 import { canon } from './util.ts';
 
@@ -30,7 +31,8 @@ export interface Location {
 /** What N (rename) and X (xrefs) act on. */
 export type Selection =
   | { kind: 'function'; fnId: string }
-  | { kind: 'addr'; addr: string }
+  /** An address: an operand target, or a data item of the listing (`name`: its label). */
+  | { kind: 'addr'; addr: string; name?: string }
   /** A parameter or local of the pseudocode (N renames it). */
   | { kind: 'variable'; fnId: string; id: string; name: string; parameter: boolean };
 
@@ -40,6 +42,8 @@ export type Dialog =
   | { kind: 'comment'; addr: string; current: string }
   | { kind: 'signature'; fnId: string; name: string; current: string; declared: boolean }
   | { kind: 'renameVar'; fnId: string; valueId: string; current: string; parameter: boolean }
+  /** `*`: an array of `type` at `addr`. */
+  | { kind: 'array'; addr: string; type: string; current: number; max: number }
   | { kind: 'open' };
 
 export interface Async<T> {
@@ -71,6 +75,8 @@ export interface State {
   listing: Async<Listing>;
   decomp: Async<Decompilation>;
   comments: Record<string, string>;
+  /** Bumped when data definitions or listing names change (the linear view reloads). */
+  dataVersion: number;
   selection: Selection | null;
   /** Instructions highlighted from a pseudo-code click. */
   linked: Set<string>;
@@ -116,6 +122,7 @@ let state: State = {
   listing: idle(),
   decomp: idle(),
   comments: {},
+  dataVersion: 0,
   selection: null,
   linked: new Set(),
   xrefs: null,
@@ -341,8 +348,10 @@ export async function navigate(
         fnId = null;
       }
     }
-    if (!fnId) view = 'hex';
+    // Outside every function: the whole-image listing shows it (the graph needs a function).
+    if (!fnId && view === 'graph') view = 'linear';
   }
+  // Data keeps the last function in the pseudocode pane, as IDA does.
   const loc: Location = { fnId: fnId ?? state.loc?.fnId ?? null, addr: a, view };
   setState((s) => ({
     loc,
@@ -355,10 +364,15 @@ export async function navigate(
   await loadCurrent();
 }
 
-/** Move the cursor within the current view without a history entry. */
-export function setCursor(addr: string, selection: Selection | null = null): void {
-  setState((s) => (s.loc ? { loc: { ...s.loc, addr: canon(addr) }, selection, linked: new Set() } : {}));
+/**
+ * Move the cursor within the current view without a history entry. `fnId`: the function the
+ * new cursor line belongs to (the whole-image listing crosses functions); the pseudocode follows.
+ */
+export function setCursor(addr: string, selection: Selection | null = null, fnId?: string): void {
+  const change = fnId !== undefined && fnId !== state.loc?.fnId;
+  setState((s) => (s.loc ? { loc: { ...s.loc, addr: canon(addr), ...(change ? { fnId } : {}) }, selection, linked: new Set() } : {}));
   writeHash();
+  if (change) void loadCurrent();
 }
 
 export function setView(view: ViewMode): void {
@@ -493,11 +507,11 @@ export async function rename(target: { id?: string; addr?: string }, name: strin
   const bid = state.bid;
   if (!bid) return;
   try {
-    await api.rename(bid, target, name);
+    const { note } = await api.rename(bid, target, name);
     await loadFunctions();
-    setState({ types: idle() });
+    setState((s) => ({ types: idle(), dataVersion: s.dataVersion + (target.addr ? 1 : 0) }));
     await reloadCurrent();
-    toast(name.trim() ? `Renamed to ${name.trim()}` : 'Name reset');
+    toast(`${name.trim() ? `Renamed to ${name.trim()}` : 'Name reset'}${note ? ` (${note})` : ''}`);
   } catch (e) {
     toast(errorText(e), 'error');
   }
@@ -526,7 +540,7 @@ export function beginRename(): void {
   else if (selection?.kind === 'addr') {
     fn = byEntry.get(selection.addr);
     if (!fn && !listing.data?.instructions.some((i) => i.addr === selection.addr)) {
-      setState({ dialog: { kind: 'rename', target: { addr: selection.addr }, current: '', what: `global at ${selection.addr}` } });
+      setState({ dialog: { kind: 'rename', target: { addr: selection.addr }, current: selection.name ?? '', what: `global at ${selection.addr}` } });
       return;
     }
   }
@@ -549,7 +563,7 @@ export function beginXrefs(): void {
   if (selection?.kind === 'addr') {
     const f = byEntry.get(selection.addr);
     if (f) return void showXrefs({ id: f.id }, `Xrefs to ${f.name}`);
-    return void showXrefs({ addr: selection.addr }, `Xrefs to ${selection.addr}`);
+    return void showXrefs({ addr: selection.addr }, `Xrefs to ${selection.name ?? selection.addr}`);
   }
   const insns = listing.data?.instructions ?? [];
   const insn = loc && (loc.view === 'linear' || loc.view === 'graph') ? insns.find((i) => i.addr === loc.addr) : undefined;
@@ -573,6 +587,47 @@ export function beginXrefs(): void {
   }
   const f = loc?.fnId ? byId.get(loc.fnId) : undefined;
   if (f) void showXrefs({ id: f.id }, `Xrefs to ${f.name}`);
+}
+
+// ------------------------------------------------------------ data (D A O * U)
+
+/** Applies a data key at the cursor (D cycles byte/word/dword/qword, A string, O pointer, U undefine). */
+export async function defineData(action: DataAction, count?: number, at?: string): Promise<void> {
+  const { bid, loc } = state;
+  const addr = at ?? loc?.addr;
+  if (!bid || !addr) return;
+  try {
+    const before = state.revision;
+    const r = await api.defineData(bid, addr, action, count);
+    setState((s) => ({ dataVersion: s.dataVersion + 1 }));
+    if (r.revision !== before) await refreshAfterAnnotation();
+    const what = r.def ? (r.def.type === 'string' ? `string (${r.def.count} bytes)` : r.def.count > 1 ? `${r.def.type}[${r.def.count}]` : r.def.type) : 'undefined';
+    toast(`${r.start}: ${what}${r.note ? ` — ${r.note}` : ''}`, r.note ? 'error' : 'info');
+  } catch (e) {
+    toast(errorText(e), 'error');
+  }
+}
+
+/** `*`: asks how many elements the array at the cursor has. */
+export async function beginArray(): Promise<void> {
+  const { bid, loc } = state;
+  if (!bid || !loc) return;
+  try {
+    const d = await api.dataAt(bid, loc.addr);
+    setState({ dialog: { kind: 'array', addr: d.start, type: d.type, current: d.def && d.def.type !== 'string' ? d.def.count : Math.max(1, d.maxCount), max: d.maxCount } });
+  } catch (e) {
+    toast(errorText(e), 'error');
+  }
+}
+
+/** IDA's P. OpenDecomp's discovery takes no seed address, so there is no way to create a function. */
+export function createFunction(): void {
+  const addr = state.loc?.addr;
+  if (!addr) return;
+  toast(
+    `Cannot create a function at ${addr}: OpenDecomp finds functions itself (functions_discover takes no start address) and has no way to add one`,
+    'error',
+  );
 }
 
 export function beginComment(): void {

@@ -3,7 +3,7 @@
 
 import { ArchiveError, archiveFileName, decodeProjectArchive, encodeProjectArchive } from './archive.ts';
 import { canon, parseAddress } from './hex.ts';
-import { AnalysisSession, ApiError } from './session.ts';
+import { AnalysisSession, ApiError, type DataAction } from './session.ts';
 import { vfs } from './vfs.ts';
 import type { TaskContext } from './tasks.ts';
 import { exportPseudocode, snapshotProject, storageUsage } from './transfer.ts';
@@ -137,7 +137,7 @@ export class Engine {
     ctx.signal.throwIfAborted();
     ctx.progress({ phase: 'write', done: 0, total: null });
     if (existing) await this.remove(record.id);
-    await this.workspace.restore(record, archive.binary, archive.comments, archive.project);
+    await this.workspace.restore(record, archive.binary, archive.comments, archive.project, archive.data);
     await this.workspace.unload(record.id);
     return { status: 'imported', record, replaced: !!existing };
   }
@@ -163,6 +163,9 @@ export class Engine {
     await this.#closeSession(bid);
     await vfs.flush();
     await vfs.removeTree(this.workspace.projectRoot(bid));
+    // Names and declared types were annotations in that project; data definitions stay in the listing.
+    const data = await this.workspace.data(bid);
+    await this.workspace.setData(bid, { defs: Object.fromEntries(Object.entries(data.defs).map(([k, d]) => [k, { type: d.type, count: d.count }])), names: {} });
     await this.workspace.unload(bid);
     return { ok: true };
   }
@@ -185,6 +188,22 @@ export class Engine {
 
   async listing(bid: string, fid: string) {
     return (await this.#session(bid)).listing(fid);
+  }
+
+  /** Rows of the whole-image listing around an address. */
+  async linear(bid: string, a: string, before: number, after: number) {
+    return (await this.#session(bid)).linear(addr(a), Number(before) || 0, Number(after) || 0);
+  }
+
+  async dataAt(bid: string, a: string) {
+    return (await this.#session(bid)).dataAt(addr(a));
+  }
+
+  async defineData(bid: string, a: string, action: DataAction, count?: number) {
+    if (!['cycle', 'string', 'ptr', 'array', 'undefine'].includes(action)) throw new ApiError(400, `Unknown data action ${action}`);
+    const result = await (await this.#session(bid)).defineData(addr(a), action, Number(count) || 0);
+    void vfs.flush();
+    return result;
   }
 
   async decompile(bid: string, fid: string, options: DecompileOptions, signal?: AbortSignal) {
@@ -231,7 +250,7 @@ export class Engine {
   async rename(bid: string, target: Target, name: string) {
     if (typeof name !== 'string') throw new ApiError(400, 'Missing name');
     const s = await this.#session(bid);
-    const result = target.id ? await s.rename({ id: target.id }, name) : await s.rename({ addr: addr(target.addr) }, name);
+    const result = target.id ? { ...(await s.rename({ id: target.id }, name)), note: null } : await s.renameGlobal(addr(target.addr), name);
     void vfs.flush();
     return result;
   }

@@ -6,6 +6,9 @@ OpenDecomp loads, disassembles and decompiles the binary, and OpenReverse runs i
 
 ## Features
 
+- **Whole-image linear view** (like IDA's disassembly view): every mapped section in address order, with a header line per section. Functions show as their disassembly (the function under the cursor carries an accent edge, and the pseudocode follows the cursor into the next function); everything between and outside functions shows as data: strings as `db "text", 0`, pointer slots (relocations, chained fixups, GOT/import slots) as `dq` with the name they point to, symbols and renamed globals as labels (`_args:`), undefined bytes as `db` rows of 16 bytes with their ASCII, runs of zeros as `db 0x40 dup(0)` and zero-fill (bss) as `db 0x200 dup(?)`. The listing is fetched by address window and extended while you scroll, so even a large image scrolls smoothly. Go to, double-click and Enter on references, back/forward, xrefs (`X`), comments (`;`) and renames (`N` on a data label or line) work on data lines too. Find (`Ctrl+F`) searches the loaded part of the listing (a few thousand lines around the cursor).
+- **Data definitions** (IDA keys): `D` cycles byte/word/dword/qword at the cursor, `A` makes a C string, `O` a pointer, `*` an array (asks for the element count), `U` undefines. Each definition is stored in the workspace (and in project archives) and declared to OpenDecomp as an asserted `type` annotation on the global (`uint32_t`, `uint8_t[16]`, `char[6]`, `void *`; the element types are declared on the image's type library), so the pseudocode types the global too. Where OpenDecomp does not take the address as data storage, a toast says the definition is kept in the listing only. Code cannot be redefined as data: OpenDecomp has no way to undefine a function.
+- **No function creation** (`P`): OpenDecomp discovers functions itself and its `functions_discover` takes no start address, so `P` only explains that.
 - **Linear disassembly** with branch labels (`loc_…`), jump arrows in a left gutter (nested lanes, conditional/unconditional colors as in the graph, the cursor's arrows emphasized), call targets shown by function name, string references as auto-comments, and optional instruction bytes.
 - **Control-flow graph**: block layout from dagre, true/false/unconditional edge colors, back edges drawn dashed, the cursor block's outgoing edges emphasized, a minimap (click or drag to move), pan, Ctrl+wheel zoom, and fit-to-view.
 - **Token highlighting**: click a register, number, label or name to highlight every occurrence in the disassembly, graph and pseudocode. Registers match their aliases (`rax`/`eax`/`ax`/`al`, `x0`/`w0`, `v0`/`q0`/`d0`/`s0`), numbers match in hex or decimal.
@@ -48,22 +51,23 @@ Everything lives in the browser's IndexedDB. The home screen shows what each bin
 
 - **⬇** downloads the original binary.
 - **Export** saves a project archive (below).
-- **Reset** deletes the binary's OpenDecomp project directory and keeps the binary and comments. OpenDecomp stores renames as annotations in the same `project.sqlite` as its analysis cache, and has no supported way to drop cached artifacts on their own (they are indexed by rows in that database and referenced by annotation catalogs; it never prunes them), so a reset also loses renames. Export an archive first if you want to keep them.
+- **Reset** deletes the binary's OpenDecomp project directory and keeps the binary, comments and data definitions (the listing's global names go with the renames). OpenDecomp stores renames as annotations in the same `project.sqlite` as its analysis cache, and has no supported way to drop cached artifacts on their own (they are indexed by rows in that database and referenced by annotation catalogs; it never prunes them), so a reset also loses renames. Export an archive first if you want to keep them.
 
 With a binary open, **Export ▾** in the top bar offers:
 
 - **All pseudocode (.zip)**: OpenDecomp's own `export` (the code of `open-decomp export`, run in the worker) in the current dialect and inference: `functions/NAME@0xADDR.c` (or `.py`; `.asm` where no pseudocode could be produced), `types.h` (the image's merged types plus the structures the functions use, `structures: 'external'`), `index.tsv`, `strings.tsv`, `imports.tsv`, `exports.tsv` and `README.txt`, in one top-level folder. Progress is reported per function and it can be cancelled. Decompiling takes up to seconds per function, and the other views wait for the function being decompiled.
 - **Project archive** and **Original binary**, as on the home screen.
 
-### Project archive format (`<name>.orproj.zip`, version 1)
+### Project archive format (`<name>.orproj.zip`, version 2)
 
 A standard ZIP file (stored or deflated entries, no ZIP64, so under 4 GiB) that any unzip tool can open:
 
 | Entry                | Contents |
 | -------------------- | -------- |
-| `open-reverse.json`  | Manifest: `{ "format": "open-reverse-project", "version": 1, "generator", "createdAt", "record": { "id", "name", "sha256", "size", "addedAt" } }` |
+| `open-reverse.json`  | Manifest: `{ "format": "open-reverse-project", "version": 1 or 2, "generator", "createdAt", "record": { "id", "name", "sha256", "size", "addedAt" } }` |
 | `binary/<name>`      | The binary. Its SHA-256 is `record.sha256` and `record.id` is the first 16 hex digits. |
 | `comments.json`      | `{ "<0xaddress>": "comment" }` |
+| `data.json`          | Version 2 only: `{ "defs": { "<0xaddress>": { "type": "u8\|u16\|u32\|u64\|ptr\|string", "count", "od"? } }, "names": { "<0xaddress>": "name" } }`: data definitions (`od`: declared to OpenDecomp too) and the listing's global names. An archive without any is written as version 1, which older OpenReverse versions read; version 1 archives are still read. |
 | `project/<path>`     | The OpenDecomp cache root of the binary: `<sha256>.default/project.sqlite` (analysis cache, annotations such as renames), `images/`, `artifacts/`. |
 
 The export works while the binary is open: the live in-memory SQLite database is serialized when no transaction is open, in the same synchronous step that copies the other files, so the database and the artifact files agree.
@@ -97,6 +101,12 @@ npm run preview        # serve web/dist locally
 | `Y`                | Edit the C prototype of the selected call target (or current function) |
 | `X`                | Cross-references to the selection (or current function) |
 | `;`                | Comment at the cursor                             |
+| `D`                | Data at the cursor: byte → word → dword → qword (listing, hex view) |
+| `A`                | C string at the cursor                            |
+| `O`                | Pointer at the cursor                             |
+| `*`                | Array at the cursor (element count asked)         |
+| `U`                | Undefine the data definition at the cursor        |
+| `P`                | Create function: not supported by OpenDecomp (explains why) |
 | `↑` `↓`            | Previous / next instruction (in the graph, across to the fall-through block) |
 | `PgUp` `PgDn`, `Home` `End` | Page up / down (linear), first / last instruction |
 | `Enter`            | Follow the selected operand, else the call/branch target under the cursor |
@@ -120,6 +130,7 @@ web/src/
   engine/
     worker.ts                    Worker entry: boots WASM + SQLite, serves RPC
     engine.ts, session.ts        Per-binary OpenDecomp session and presentation
+    linear.ts                    Whole-image listing: sections, functions, data items, undefined bytes, by address window
     prototype.ts                 C prototype -> OpenDecomp signature (via its C declaration parser)
     workspace.ts, vfs.ts         Binaries/projects in a VFS persisted to IndexedDB
     archive.ts, zip.ts           Project archive format and the ZIP container
@@ -132,7 +143,7 @@ vendor/open-decomp               OpenDecomp (git submodule, unmodified)
 
 ## Tests
 
-- `npm test` runs unit tests under Node: the shims (VFS/fs, SQLite, crypto, zstd, v8), the ZIP/project archive encoder and validator, the token keys used for highlighting, and the C prototype compiler (with OpenDecomp's declaration parser).
+- `npm test` runs unit tests under Node: the shims (VFS/fs, SQLite, crypto, zstd, v8), the ZIP/project archive encoder and validator, the token keys used for highlighting, and the C prototype compiler (with OpenDecomp's declaration parser), and the whole-image listing's layout (windows built forward and backward join without gaps).
 - `npm run test:e2e` drives the built site in Chromium. Start the site first with `npm run preview -- --port 5199`, and install the browser with `npm i -D playwright && npx playwright install chromium` (or point `PLAYWRIGHT_PATH` at a playwright package installed elsewhere). It covers:
   - upload, decompilation, renames propagating to callers, comments and persistence across a reload;
   - parameter/local renames, type declarations, and signatures propagating to callers;

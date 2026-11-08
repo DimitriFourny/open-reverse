@@ -6,11 +6,14 @@ import { Sidebar } from './components/Sidebar.tsx';
 import { XrefsPanel } from './components/XrefsPanel.tsx';
 import {
   back,
+  beginArray,
   beginComment,
   beginRename,
   beginSignature,
   beginXrefs,
   closeBinary,
+  createFunction,
+  defineData,
   deleteBinary,
   forward,
   getState,
@@ -58,6 +61,12 @@ function useKeyboard() {
       else if (k === 'x' || k === 'X') beginXrefs();
       else if (k === 'y' || k === 'Y') void beginSignature();
       else if (k === ';' || k === '/') beginComment();
+      else if (dataKeys(s.loc?.view) && (k === 'd' || k === 'D')) void defineData('cycle');
+      else if (dataKeys(s.loc?.view) && (k === 'a' || k === 'A')) void defineData('string');
+      else if (dataKeys(s.loc?.view) && (k === 'o' || k === 'O')) void defineData('ptr');
+      else if (dataKeys(s.loc?.view) && (k === 'u' || k === 'U')) void defineData('undefine');
+      else if (dataKeys(s.loc?.view) && k === '*') void beginArray();
+      else if (dataKeys(s.loc?.view) && (k === 'p' || k === 'P')) createFunction();
       else if (k === 'Escape') {
         if (getUi().find) setUi({ find: null });
         else if (s.xrefs) setState({ xrefs: null });
@@ -73,6 +82,9 @@ function useKeyboard() {
     return () => window.removeEventListener('keydown', onKey);
   }, []);
 }
+
+/** The data keys (D A O * U P) act on the cursor of the listing and the hex view. */
+const dataKeys = (view: ViewMode | undefined) => view === 'linear' || view === 'hex';
 
 function FilePicker({ children, className }: { children: React.ReactNode; className?: string }) {
   const ref = useRef<HTMLInputElement>(null);
@@ -217,7 +229,7 @@ function TopBar() {
   const canFwd = useStore((s) => s.future.length > 0);
   const discovery = useStore((s) => s.discovery);
   const views: [ViewMode, string, string][] = [
-    ['linear', 'Linear', 'Linear disassembly (Space toggles graph)'],
+    ['linear', 'Linear', 'The whole image in address order: code, data and undefined bytes (Space toggles graph)'],
     ['graph', 'Graph', 'Control-flow graph (Space)'],
     ['hex', 'Hex', 'Hex view (H)'],
     ['types', 'Types', 'Type library editor and recovered structure types'],
@@ -298,7 +310,9 @@ function StatusBar() {
       {fn && loc && (
         <span className="dim">
           {fn.name}
-          {loc.addr !== fn.entry && BigInt(loc.addr) > BigInt(fn.entry) ? `+0x${(BigInt(loc.addr) - BigInt(fn.entry)).toString(16)}` : ''}
+          {loc.addr !== fn.entry && BigInt(loc.addr) > BigInt(fn.entry) && BigInt(loc.addr) < BigInt(fn.entry) + BigInt(fn.size)
+            ? `+0x${(BigInt(loc.addr) - BigInt(fn.entry)).toString(16)}`
+            : ''}
         </span>
       )}
       {open && (
@@ -309,7 +323,7 @@ function StatusBar() {
       )}
       {showToast && <span className={`toast toast-${toast.kind}`}>{toast.text}</span>}
       <span className="spacer" />
-      <span className="dim keys">G go · ↑↓ move · Enter follow · Ctrl+F find · N rename · Y signature · X xrefs · ; comment · Space graph · Tab pseudo · H hex · B bytes · Esc back</span>
+      <span className="dim keys">G go · ↑↓ move · Enter follow · Ctrl+F find · N rename · Y signature · X xrefs · ; comment · D A O * U data · Space graph · Tab pseudo · H hex · B bytes · Esc back</span>
     </div>
   );
 }
@@ -342,9 +356,11 @@ function MainView() {
   if (!loc) return <div className="placeholder">Select a function.</div>;
   if (loc.view === 'hex') return <HexView />;
   if (loc.view === 'types') return <TypesView />;
+  if (loc.view === 'linear') return <LinearView />;
+  if (!loc.fnId) return <div className="placeholder">No function here (Space: linear view).</div>;
   if (listing.status === 'error') return <div className="placeholder error">{listing.error}</div>;
   if (!listing.data) return <div className="placeholder">Disassembling…</div>;
-  return loc.view === 'graph' ? <GraphView listing={listing.data} /> : <LinearView listing={listing.data} />;
+  return <GraphView listing={listing.data} />;
 }
 
 function PseudoPane() {

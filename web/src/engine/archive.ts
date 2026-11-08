@@ -1,4 +1,4 @@
-// OpenReverse project archive (`<name>.orproj.zip`), format version 1.
+// OpenReverse project archive (`<name>.orproj.zip`), format version 2 (reads 1 and 2).
 //
 // A plain ZIP file holding one binary and everything OpenReverse keeps for it:
 //
@@ -6,6 +6,10 @@
 //                         generator, createdAt, record: BinaryRecord }
 //   binary/<record.name>  the binary itself (its SHA-256 must equal record.sha256)
 //   comments.json         { "<0xaddr>": "text" } user comments
+//   data.json             (version 2) { "defs": { "<0xaddr>": { "type", "count", "od"? } },
+//                         "names": { "<0xaddr>": "name" } }: data definitions and listing
+//                         names. An archive without them is written as version 1, so
+//                         older OpenReverse versions still read it.
 //   project/<path>        the OpenDecomp project directory (cache root) as stored
 //                         under /workspace/binaries/<id>/project/: project.sqlite
 //                         (analysis cache, annotations such as renames), images/,
@@ -15,13 +19,14 @@
 // only, no duplicate, absolute, `..`, backslash or control-character paths,
 // size limits, the binary hash, the record and the comments.
 
-import { sanitizeFileName, sha256Hex } from './workspace.ts';
+import { DATA_TYPES } from './linear.ts';
+import { emptyData, isEmptyData, sanitizeFileName, sha256Hex, type WorkspaceData } from './workspace.ts';
 
 export { sha256Hex };
 import { DEFAULT_ZIP_LIMITS, ZipError, zipDecode, zipEncode, type ZipEntry, type ZipLimits } from './zip.ts';
 
 export const ARCHIVE_FORMAT = 'open-reverse-project';
-export const ARCHIVE_VERSION = 1;
+export const ARCHIVE_VERSION = 2;
 export const ARCHIVE_MANIFEST = 'open-reverse.json';
 export const ARCHIVE_EXTENSION = '.orproj.zip';
 
@@ -37,6 +42,8 @@ export interface ProjectArchive {
   record: ArchiveRecord;
   binary: Uint8Array;
   comments: Record<string, string>;
+  /** Data definitions and listing names (version 2; empty in version 1). */
+  data: WorkspaceData;
   /** Files of the OpenDecomp project directory, keyed by path relative to it. */
   project: Map<string, Uint8Array>;
 }
@@ -95,7 +102,7 @@ export async function encodeProjectArchive(
   const createdAt = opts.createdAt ?? new Date();
   const manifest: ArchiveManifest = {
     format: ARCHIVE_FORMAT,
-    version: ARCHIVE_VERSION,
+    version: isEmptyData(archive.data) ? 1 : ARCHIVE_VERSION,
     generator: 'OpenReverse',
     createdAt: createdAt.toISOString(),
     record: archive.record,
@@ -105,6 +112,7 @@ export async function encodeProjectArchive(
     { path: `binary/${archive.record.name}`, data: archive.binary },
     { path: 'comments.json', data: enc.encode(JSON.stringify(archive.comments)) },
   ];
+  if (!isEmptyData(archive.data)) entries.push({ path: 'data.json', data: enc.encode(JSON.stringify(archive.data)) });
   for (const [rel, data] of [...archive.project].sort((a, b) => (a[0] < b[0] ? -1 : 1))) {
     const safe = safeRelativePath(rel);
     if (safe === null) throw new ArchiveError(`Unsafe project path ${JSON.stringify(rel)}`);
@@ -149,6 +157,39 @@ function validateComments(value: unknown): Record<string, string> {
   return out;
 }
 
+const ADDR_RE = /^0x[0-9a-f]{1,16}$/;
+
+function validateData(value: unknown): WorkspaceData {
+  const v = value as Partial<Record<keyof WorkspaceData, unknown>> | null;
+  if (!v || typeof v !== 'object' || Array.isArray(v)) throw new ArchiveError('data.json must be an object');
+  const out = emptyData();
+  const defs = v.defs ?? {};
+  const names = v.names ?? {};
+  if (typeof defs !== 'object' || Array.isArray(defs) || typeof names !== 'object' || Array.isArray(names)) throw new ArchiveError('Invalid data.json');
+  if (Object.keys(defs).length + Object.keys(names).length > MAX_COMMENTS) throw new ArchiveError('Too many data definitions');
+  for (const [k, d] of Object.entries(defs as Record<string, unknown>)) {
+    const def = d as { type?: unknown; count?: unknown; od?: unknown } | null;
+    if (
+      !ADDR_RE.test(k) ||
+      !def ||
+      !DATA_TYPES.includes(def.type as never) ||
+      typeof def.count !== 'number' ||
+      !Number.isSafeInteger(def.count) ||
+      def.count < 1 ||
+      def.count > 1 << 24 ||
+      (def.od !== undefined && typeof def.od !== 'boolean')
+    )
+      throw new ArchiveError(`Invalid data definition at ${JSON.stringify(k.slice(0, 40))}`);
+    out.defs[k] = { type: def.type as WorkspaceData['defs'][string]['type'], count: def.count, ...(def.od ? { od: true } : {}) };
+  }
+  for (const [k, n] of Object.entries(names as Record<string, unknown>)) {
+    if (!ADDR_RE.test(k) || typeof n !== 'string' || !/^[A-Za-z_][A-Za-z0-9_:$.@]{0,1023}$/.test(n))
+      throw new ArchiveError(`Invalid name at ${JSON.stringify(k.slice(0, 40))}`);
+    out.names[k] = n;
+  }
+  return out;
+}
+
 const SQLITE_MAGIC = enc.encode('SQLite format 3\0');
 
 /** Decodes and validates an archive. Throws ArchiveError describing the first problem. */
@@ -179,11 +220,13 @@ export async function decodeProjectArchive(bytes: Uint8Array, limits: ArchiveLim
   const binaryPath = `binary/${record.name}`;
   let binary: Uint8Array | null = null;
   let comments: Record<string, string> = {};
+  let workspaceData = emptyData();
   const project = new Map<string, Uint8Array>();
   for (const [path, data] of byPath) {
     if (path === ARCHIVE_MANIFEST) continue;
     if (path === binaryPath) binary = data;
     else if (path === 'comments.json') comments = validateComments(parseJson(data, 'comments.json'));
+    else if (path === 'data.json' && manifest.version >= 2) workspaceData = validateData(parseJson(data, 'data.json'));
     else if (path === 'project/' || path === 'binary/') continue;
     else if (path.startsWith('project/')) {
       const isDir = path.endsWith('/');
@@ -204,5 +247,5 @@ export async function decodeProjectArchive(bytes: Uint8Array, limits: ArchiveLim
   if (!binary) throw new ArchiveError(`The archive has no binary (${binaryPath})`);
   if (binary.byteLength !== record.size) throw new ArchiveError('The binary size does not match the manifest');
   if ((await sha256Hex(binary)) !== record.sha256) throw new ArchiveError('The binary does not match its sha256 (corrupt archive)');
-  return { record, binary, comments, project };
+  return { record, binary, comments, data: workspaceData, project };
 }

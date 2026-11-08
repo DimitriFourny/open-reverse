@@ -340,12 +340,36 @@ select:focus {
   cursor: default;
 }
 .row.insn:hover,
+.row.data:hover,
 .gline.insn:hover {
   background: #1e2430;
 }
 .row.cursor,
 .gline.cursor {
   background: var(--cursor);
+}
+/* Whole-image listing: the current function's lines carry an accent edge. */
+.row.cur-fn {
+  box-shadow: inset 2px 0 var(--accent-2);
+}
+.row-section {
+  color: var(--kw);
+  font-weight: 600;
+}
+.row.data .mn-data {
+  color: #8fb3d9;
+}
+.row.data.undefined .op,
+.row.data.undefined .mn-data {
+  color: #7a8597;
+}
+.label-data {
+  color: var(--num);
+  font-weight: 600;
+  cursor: pointer;
+}
+.label.selected {
+  background: var(--sel);
 }
 .row.linked,
 .gline.linked {

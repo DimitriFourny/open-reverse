@@ -3,10 +3,12 @@
 //
 //   /workspace/meta/<id>.json            BinaryRecord        (always loaded)
 //   /workspace/meta/<id>.comments.json   { "<va>": "text" }  (always loaded)
+//   /workspace/meta/<id>.data.json       WorkspaceData: data definitions and listing names
 //   /workspace/binaries/<id>/<name>      the binary          (loaded on open)
 //   /workspace/binaries/<id>/project/    OpenDecomp cache root
 
 import { sha256 } from '@noble/hashes/sha2.js';
+import type { DataDef } from './linear.ts';
 import { vfs } from './vfs.ts';
 
 export interface BinaryRecord {
@@ -15,6 +17,18 @@ export interface BinaryRecord {
   sha256: string;
   size: number;
   addedAt: string;
+}
+
+/** What the listing keeps per binary besides comments. */
+export interface WorkspaceData {
+  /** Data definitions by address; `od`: declared to OpenDecomp as a `type` annotation too. */
+  defs: Record<string, DataDef & { od?: boolean }>;
+  /** Global names by address, as the listing's labels (OpenDecomp keeps its own `name` annotations). */
+  names: Record<string, string>;
+}
+
+export function emptyData(): WorkspaceData {
+  return { defs: {}, names: {} };
 }
 
 const ROOT = '/workspace';
@@ -102,7 +116,7 @@ export class Workspace {
 
   async remove(id: string): Promise<void> {
     await vfs.removeTree(this.dir(id));
-    for (const p of [`${META}/${check(id)}.json`, `${META}/${id}.comments.json`]) if (vfs.get(p)) vfs.unlink(p);
+    for (const p of this.metaPaths(id)) if (vfs.get(p)) vfs.unlink(p);
     await vfs.flush();
   }
 
@@ -111,7 +125,13 @@ export class Workspace {
    * relative to the project root, already validated) as a new record.
    * The caller removes any existing record first.
    */
-  async restore(record: BinaryRecord, binary: Uint8Array, comments: Record<string, string>, project: Map<string, Uint8Array>): Promise<void> {
+  async restore(
+    record: BinaryRecord,
+    binary: Uint8Array,
+    comments: Record<string, string>,
+    project: Map<string, Uint8Array>,
+    data: WorkspaceData = emptyData(),
+  ): Promise<void> {
     const dir = this.dir(record.id);
     if (this.get(record.id) || vfs.get(dir)) throw new Error(`Binary ${record.id} already exists`);
     const root = this.projectRoot(record.id);
@@ -125,13 +145,25 @@ export class Workspace {
       vfs.write(path, data);
     }
     if (Object.keys(comments).length) writeJson(`${META}/${record.id}.comments.json`, comments);
+    if (!isEmptyData(data)) writeJson(`${META}/${record.id}.data.json`, data);
     writeJson(`${META}/${record.id}.json`, record);
     await vfs.flush();
   }
 
-  /** Paths of a binary's metadata files (record, comments). */
+  /** Paths of a binary's metadata files (record, comments, data definitions). */
   metaPaths(id: string): string[] {
-    return [`${META}/${check(id)}.json`, `${META}/${id}.comments.json`];
+    return [`${META}/${check(id)}.json`, `${META}/${id}.comments.json`, `${META}/${id}.data.json`];
+  }
+
+  async data(id: string): Promise<WorkspaceData> {
+    return { ...emptyData(), ...readJson<Partial<WorkspaceData>>(`${META}/${check(id)}.data.json`, {}) };
+  }
+
+  async setData(id: string, data: WorkspaceData): Promise<void> {
+    const path = `${META}/${check(id)}.data.json`;
+    if (isEmptyData(data)) {
+      if (vfs.get(path)) vfs.unlink(path);
+    } else writeJson(path, data);
   }
 
   async comments(id: string): Promise<Record<string, string>> {
@@ -145,6 +177,10 @@ export class Workspace {
     writeJson(`${META}/${id}.comments.json`, comments);
     return comments;
   }
+}
+
+export function isEmptyData(data: WorkspaceData): boolean {
+  return Object.keys(data.defs).length === 0 && Object.keys(data.names).length === 0;
 }
 
 /** SHA-256 of `bytes` as hex. `crypto.subtle` exists only in secure contexts (HTTPS or
