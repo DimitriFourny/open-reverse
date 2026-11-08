@@ -135,11 +135,26 @@ export interface Xref {
   from: string | null;
   to: string | null;
   fromFunction: { id: string; name: string; entry: string } | null;
+  /** The function the reference goes to (its entry, or the entity it names). */
+  toFunction: { id: string; name: string; entry: string } | null;
   toName: string | null;
   kind: string;
   status: string;
   role: string;
 }
+
+export type XrefDirection = 'incoming' | 'outgoing';
+
+/** A caller or callee: a function (id set), or an import known only by name. */
+export interface CallNode {
+  id: string | null;
+  name: string;
+  entry: string | null;
+  sites: number;
+}
+
+/** This app's annotations on one function, as stored (opaque to the UI; undo restores them). */
+export type AnnotationSnapshot = { id: string; value: unknown; status: string }[];
 
 export interface StringItem {
   addr: string;
@@ -279,7 +294,8 @@ export const api = {
   functionAt: (bid: string, addr: string) => call<{ function: FunctionSummary | null }>('functionAt', [bid, addr]),
   listing: (bid: string, fid: string) => call<Listing>('listing', [bid, fid]),
   decompile: (bid: string, fid: string, o: DecompileOptions, signal?: AbortSignal) => call<Decompilation>('decompile', [bid, fid, o], signal),
-  xrefs: (bid: string, target: { id?: string; addr?: string }, direction = 'incoming') => call<{ xrefs: Xref[] }>('xrefs', [bid, target, direction]),
+  xrefs: (bid: string, target: { id?: string; addr?: string }, direction: XrefDirection = 'incoming') => call<{ xrefs: Xref[] }>('xrefs', [bid, target, direction]),
+  calls: (bid: string, fid: string) => call<{ callers: CallNode[]; callees: CallNode[] }>('calls', [bid, fid]),
   strings: (bid: string) => call<{ strings: StringItem[] }>('strings', [bid]),
   symbols: (bid: string) => call<{ symbols: SymbolItem[] }>('symbols', [bid]),
   sections: (bid: string) => call<{ sections: Section[] }>('sections', [bid]),
@@ -287,16 +303,23 @@ export const api = {
   memory: (bid: string, addr: string, length: number) => call<MemoryChunk>('memory', [bid, addr, length]),
   comments: (bid: string) => call<{ comments: Record<string, string> }>('comments', [bid]),
   rename: (bid: string, target: { id?: string; addr?: string }, name: string) => call<{ revision: number }>('rename', [bid, target, name]),
-  declareTypes: (bid: string, source: string) => call<{ revision: number; declared: string[] }>('declareTypes', [bid, source]),
-  removeLibraryType: (bid: string, annotationId: string) => call<{ revision: number }>('removeLibraryType', [bid, annotationId]),
+  /** `annotations`: the library annotation of each declared name. */
+  declareTypes: (bid: string, source: string) =>
+    call<{ revision: number; declared: string[]; annotations: Record<string, string> }>('declareTypes', [bid, source]),
+  removeLibraryTypes: (bid: string, annotationIds: string[]) => call<{ revision: number }>('removeLibraryTypes', [bid, annotationIds]),
+  annotationSnapshot: (bid: string, fid: string) => call<{ snapshot: AnnotationSnapshot }>('annotationSnapshot', [bid, fid]),
+  restoreAnnotations: (bid: string, fid: string, snapshot: AnnotationSnapshot) => call<{ revision: number }>('restoreAnnotations', [bid, fid, snapshot]),
   prototype: (bid: string, fid: string) => call<{ text: string; declared: boolean }>('prototype', [bid, fid]),
   setSignature: (bid: string, fid: string, text: string) => call<{ revision: number; confirmed: boolean }>('setSignature', [bid, fid, text]),
   renameVariable: (bid: string, fid: string, valueId: string, name: string, o: DecompileOptions) =>
     call<{ revision: number }>('renameVariable', [bid, fid, valueId, name, o]),
   comment: (bid: string, addr: string, text: string) => call<{ comments: Record<string, string> }>('comment', [bid, addr, text]),
+  bookmarks: (bid: string) => call<{ bookmarks: Record<string, string> }>('bookmarks', [bid]),
+  /** Bookmark an address (empty description is fine); null removes the bookmark. */
+  bookmark: (bid: string, addr: string, description: string | null) => call<{ bookmarks: Record<string, string> }>('bookmark', [bid, addr, description]),
 
   // ------------------------------------------------- data in / out, storage
-  /** A project archive (.orproj.zip) of a binary: the binary, its OpenDecomp project, comments. */
+  /** A project archive (.orproj.zip) of a binary: the binary, its OpenDecomp project, comments, bookmarks. */
   exportArchive: (bid: string, onProgress?: (p: TaskProgress) => void, signal?: AbortSignal) =>
     call<{ name: string; bytes: Uint8Array }>('exportArchive', [bid], signal, [], onProgress),
   /** Restore an archive. A binary that already exists is a `conflict` unless `replace`. */

@@ -69,7 +69,7 @@ export function TypesView() {
     setErrors([]);
   };
   const remove = (t: LibraryType) => {
-    if (confirm(`Remove ${t.name} from the type library?`)) void removeLibraryType(t.annotationId, t.name ?? t.typeId);
+    if (confirm(`Remove ${t.name} from the type library?`)) void removeLibraryType(t);
   };
 
   return (

@@ -1,8 +1,9 @@
-// Workspace in the browser: binaries, their OpenDecomp projects and comments,
-// all in the VFS (persisted to IndexedDB).
+// Workspace in the browser: binaries, their OpenDecomp projects, comments and
+// bookmarks, all in the VFS (persisted to IndexedDB).
 //
-//   /workspace/meta/<id>.json            BinaryRecord        (always loaded)
-//   /workspace/meta/<id>.comments.json   { "<va>": "text" }  (always loaded)
+//   /workspace/meta/<id>.json            BinaryRecord               (always loaded)
+//   /workspace/meta/<id>.comments.json   { "<va>": "text" }         (always loaded)
+//   /workspace/meta/<id>.bookmarks.json  { "<va>": "description" }  (always loaded)
 //   /workspace/binaries/<id>/<name>      the binary          (loaded on open)
 //   /workspace/binaries/<id>/project/    OpenDecomp cache root
 
@@ -102,16 +103,22 @@ export class Workspace {
 
   async remove(id: string): Promise<void> {
     await vfs.removeTree(this.dir(id));
-    for (const p of [`${META}/${check(id)}.json`, `${META}/${id}.comments.json`]) if (vfs.get(p)) vfs.unlink(p);
+    for (const p of this.metaPaths(id)) if (vfs.get(p)) vfs.unlink(p);
     await vfs.flush();
   }
 
   /**
-   * Write a binary, its comments and its OpenDecomp project files (paths
+   * Write a binary, its comments, bookmarks and OpenDecomp project files (paths
    * relative to the project root, already validated) as a new record.
    * The caller removes any existing record first.
    */
-  async restore(record: BinaryRecord, binary: Uint8Array, comments: Record<string, string>, project: Map<string, Uint8Array>): Promise<void> {
+  async restore(
+    record: BinaryRecord,
+    binary: Uint8Array,
+    comments: Record<string, string>,
+    project: Map<string, Uint8Array>,
+    bookmarks: Record<string, string> = {},
+  ): Promise<void> {
     const dir = this.dir(record.id);
     if (this.get(record.id) || vfs.get(dir)) throw new Error(`Binary ${record.id} already exists`);
     const root = this.projectRoot(record.id);
@@ -125,13 +132,14 @@ export class Workspace {
       vfs.write(path, data);
     }
     if (Object.keys(comments).length) writeJson(`${META}/${record.id}.comments.json`, comments);
+    if (Object.keys(bookmarks).length) writeJson(`${META}/${record.id}.bookmarks.json`, bookmarks);
     writeJson(`${META}/${record.id}.json`, record);
     await vfs.flush();
   }
 
-  /** Paths of a binary's metadata files (record, comments). */
+  /** Paths of a binary's metadata files (record, comments, bookmarks). */
   metaPaths(id: string): string[] {
-    return [`${META}/${check(id)}.json`, `${META}/${id}.comments.json`];
+    return [`${META}/${check(id)}.json`, `${META}/${id}.comments.json`, `${META}/${id}.bookmarks.json`];
   }
 
   async comments(id: string): Promise<Record<string, string>> {
@@ -144,6 +152,19 @@ export class Workspace {
     else comments[address] = text;
     writeJson(`${META}/${id}.comments.json`, comments);
     return comments;
+  }
+
+  async bookmarks(id: string): Promise<Record<string, string>> {
+    return readJson<Record<string, string>>(`${META}/${check(id)}.bookmarks.json`, {});
+  }
+
+  /** Bookmarks an address with a description (may be empty); null removes the bookmark. */
+  async setBookmark(id: string, address: string, description: string | null): Promise<Record<string, string>> {
+    const bookmarks = await this.bookmarks(id);
+    if (description === null) delete bookmarks[address];
+    else bookmarks[address] = description.trim();
+    writeJson(`${META}/${id}.bookmarks.json`, bookmarks);
+    return bookmarks;
   }
 }
 
