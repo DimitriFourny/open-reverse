@@ -637,9 +637,10 @@ async function applyRename(target: XrefTarget, name: string): Promise<string | n
   return note;
 }
 
-export const rename = tracked(async (target: XrefTarget, name: string): Promise<void> => {
+/** Renames a function or global; resolves to the error text (also toasted), or null. */
+export const rename = tracked(async (target: XrefTarget, name: string): Promise<string | null> => {
   const { bid, byId } = state;
-  if (!bid) return;
+  if (!bid) return 'No binary open';
   try {
     const fn = target.id ? byId.get(target.id) : undefined;
     const label = `rename of ${fn?.name ?? target.addr ?? 'symbol'}`;
@@ -654,11 +655,13 @@ export const rename = tracked(async (target: XrefTarget, name: string): Promise<
       const note = await applyRename(target, name);
       if (previous !== name.trim())
         record(bid, { label, undo: async () => void (await applyRename(target, previous)), redo: async () => void (await applyRename(target, name)) });
-      if (note) return toast(`Renamed to ${name.trim()} (${note})`);
+      if (note) return (toast(`Renamed to ${name.trim()} (${note})`), null);
     }
     toast(name.trim() ? `Renamed to ${name.trim()}` : 'Name reset');
+    return null;
   } catch (e) {
     toast(errorText(e), 'error');
+    return errorText(e);
   }
 });
 
@@ -667,16 +670,19 @@ async function applyComment(addr: string, text: string): Promise<void> {
   setState({ comments });
 }
 
-export const setComment = tracked(async (addr: string, text: string): Promise<void> => {
+/** Resolves to the error text (also toasted), or null. */
+export const setComment = tracked(async (addr: string, text: string): Promise<string | null> => {
   const bid = state.bid;
-  if (!bid) return;
+  if (!bid) return 'No binary open';
   const previous = state.comments[addr] ?? '';
   try {
     await applyComment(addr, text);
     if (previous.trim() !== text.trim())
       record(bid, { label: `comment at ${addr}`, undo: () => applyComment(addr, previous), redo: () => applyComment(addr, text) });
+    return null;
   } catch (e) {
     toast(errorText(e), 'error');
+    return errorText(e);
   }
 });
 
@@ -687,10 +693,10 @@ async function applyBookmark(addr: string, description: string | null): Promise<
   setState({ bookmarks });
 }
 
-/** Bookmarks an address (Alt+M); null removes the bookmark. */
-export const setBookmark = tracked(async (addr: string, description: string | null): Promise<void> => {
+/** Bookmarks an address (Alt+M); null removes the bookmark. Resolves to the error text (also toasted), or null. */
+export const setBookmark = tracked(async (addr: string, description: string | null): Promise<string | null> => {
   const bid = state.bid;
-  if (!bid) return;
+  if (!bid) return 'No binary open';
   const previous = state.bookmarks[addr] ?? null;
   const next = description === null ? null : description.trim();
   try {
@@ -702,8 +708,10 @@ export const setBookmark = tracked(async (addr: string, description: string | nu
         redo: () => applyBookmark(addr, next),
       });
     toast(next === null ? `Bookmark at ${addr} removed` : `Bookmarked ${addr}`);
+    return null;
   } catch (e) {
     toast(errorText(e), 'error');
+    return errorText(e);
   }
 });
 
@@ -807,11 +815,14 @@ async function applyData(range: { start: string; end: string }, defs: Record<str
   await afterData(before, r.revision);
 }
 
-/** Applies a data key at the cursor (D cycles byte/word/dword/qword, A string, O pointer, * array, U undefine). */
-export const defineData = tracked(async (action: DataAction, count?: number, at?: string): Promise<void> => {
+/**
+ * Applies a data key at the cursor or `at` (D cycles byte/word/dword/qword, A string, O pointer, * array, U undefine).
+ * Resolves to what was defined, or the error text (also toasted).
+ */
+export const defineData = tracked(async (action: DataAction, count?: number, at?: string): Promise<{ start: string; def: DataDef | null; note: string | null } | string> => {
   const { bid, loc } = state;
   const addr = at ?? loc?.addr;
-  if (!bid || !addr) return;
+  if (!bid || !addr) return 'No address';
   try {
     const before = state.revision;
     const r = await api.defineData(bid, addr, action, count);
@@ -823,8 +834,10 @@ export const defineData = tracked(async (action: DataAction, count?: number, at?
       redo: () => applyData(r.range, after),
     });
     toast(`${r.start}: ${defText(r.def)}${r.note ? ` — ${r.note}` : ''}`, r.note ? 'error' : 'info');
+    return { start: r.start, def: r.def, note: r.note };
   } catch (e) {
     toast(errorText(e), 'error');
+    return errorText(e);
   }
 });
 
@@ -1110,9 +1123,9 @@ async function applyRenameVariable(fnId: string, valueId: string, name: string):
  * Renames a parameter or local (empty restores the generated name). `current` is the name
  * the pseudocode shows: undo gives it back (as a name annotation when it was generated).
  */
-export const renameVariable = tracked(async (fnId: string, valueId: string, name: string, current: string): Promise<void> => {
+export const renameVariable = tracked(async (fnId: string, valueId: string, name: string, current: string): Promise<string | null> => {
   const bid = state.bid;
-  if (!bid) return;
+  if (!bid) return 'No binary open';
   try {
     const previous = knownNames.get(`${bid}|value:${valueId}`) ?? current;
     await applyRenameVariable(fnId, valueId, name);
@@ -1123,7 +1136,9 @@ export const renameVariable = tracked(async (fnId: string, valueId: string, name
         redo: () => applyRenameVariable(fnId, valueId, name),
       });
     toast(name.trim() ? `Renamed to ${name.trim()}` : 'Name reset');
+    return null;
   } catch (e) {
     toast(errorText(e), 'error');
+    return errorText(e);
   }
 });
