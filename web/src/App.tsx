@@ -21,6 +21,8 @@ import { XrefsPanel } from './components/XrefsPanel.tsx';
 import { NAV_LEGEND, NavStrip, navStripHidden } from './components/NavStrip.tsx';
 import { SearchPanel } from './components/SearchPanel.tsx';
 import { ScriptConsole } from './components/ScriptConsole.tsx';
+import { DiffView } from './components/DiffView.tsx';
+import { getDiff, resetDiff, showDiff, useDiff } from './diff.ts';
 import { getConsole, stopScript, toggleConsole } from './scripting.ts';
 import { closeSearch, getSearch, openSearch } from './search.ts';
 import {
@@ -65,6 +67,11 @@ function useKeyboard() {
     const onKey = (e: KeyboardEvent) => {
       const s = getState();
       if (s.dialog || isEditableTarget(e.target) || !s.bid) return;
+      // The diff view has its own keys (see DiffView); Esc leaves it.
+      if (getDiff().open) {
+        if (e.key === 'Escape') showDiff(false);
+        return;
+      }
       const k = e.key;
       const plain = !e.ctrlKey && !e.metaKey && !e.altKey;
       const ctrl = (e.ctrlKey || e.metaKey) && !e.altKey;
@@ -184,6 +191,17 @@ function Home() {
                   <span className="dim">{fmtSize(b.size)}</span>
                   <UsageCell id={b.id} />
                   <span className="dim">{new Date(b.addedAt).toLocaleString()}</span>
+                  <button
+                    className="act-diff"
+                    title="Open this binary and diff it with another one (for instance its other version)"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      void openBinary(b.id);
+                      setState({ dialog: { kind: 'diffWith' } });
+                    }}
+                  >
+                    Diff…
+                  </button>
                   <RecentActions b={b} />
                   <button
                     className="close"
@@ -359,6 +377,7 @@ function TopBar({ showNav, onToggleNav }: { showNav?: boolean; onToggleNav?: () 
         <button onClick={() => setState({ dialog: { kind: 'goto' } })} title="Go to (G, Ctrl+P)">Go to…</button>
         <button onClick={() => openSearch()} title="Search bytes (Alt+B), text (Alt+T) or an immediate value (Alt+I)">Search…</button>
         <button onClick={toggleConsole} title="JavaScript console with the `or` scripting API (Shift+F2)">Script</button>
+        <DiffButton />
       </div>
       <div className="seg">
         {views.map(([v, label, title]) => (
@@ -396,6 +415,23 @@ function TopBar({ showNav, onToggleNav }: { showNav?: boolean; onToggleNav?: () 
       <ExportMenu />
       <FilePicker>Open…</FilePicker>
     </div>
+  );
+}
+
+/** Diff with another binary; once a diff ran, shows and hides its view. */
+function DiffButton() {
+  const bid = useStore((s) => s.bid);
+  const diff = useDiff((d) => (d.bid === bid && d.status !== 'idle' ? d.open : null));
+  if (diff === null)
+    return (
+      <button className="diff-button" onClick={() => setState({ dialog: { kind: 'diffWith' } })} title="Diff this binary with another stored binary (BinDiff style)">
+        Diff…
+      </button>
+    );
+  return (
+    <button className={`diff-button${diff ? ' active' : ''}`} onClick={() => showDiff(!diff)} title={diff ? 'Back to the code (Esc)' : 'Show the diff'}>
+      Diff
+    </button>
   );
 }
 
@@ -531,6 +567,18 @@ export function App() {
       return !v;
     });
   useKeyboard();
+  const diffOpen = useDiff((d) => d.open && d.bid === bid);
+  // A diff belongs to the binary it was run on.
+  useEffect(() => {
+    if (getDiff().bid !== bid) resetDiff();
+  }, [bid]);
+  // Going somewhere else (the sidebar, Go to) leaves the diff view.
+  const loc = useStore((s) => s.loc);
+  const lastLoc = useRef(loc);
+  useEffect(() => {
+    if (lastLoc.current && loc !== lastLoc.current && getDiff().open) showDiff(false);
+    lastLoc.current = loc;
+  }, [loc]);
   useEffect(() => {
     const onStorageError = (e: Event) => toast((e as CustomEvent<string>).detail, 'error');
     addEventListener('open-reverse:storage-error', onStorageError);
@@ -581,6 +629,8 @@ export function App() {
           </div>
           <Resizer onDrag={(dx) => setSideW((w) => Math.max(160, Math.min(700, w + dx)))} />
           <div className="center">
+            {diffOpen ? <DiffView /> : (
+            <>
             <div className="panes">
               <div className="pane-main">
                 <MainView />
@@ -596,6 +646,8 @@ export function App() {
             </div>
             <XrefsPanel />
             <SearchPanel />
+            </>
+            )}
             <ScriptConsole />
           </div>
         </div>

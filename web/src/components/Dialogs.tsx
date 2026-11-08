@@ -15,6 +15,7 @@ import {
   useStore,
   type Dialog,
 } from '../store.ts';
+import { DiffPicker } from './DiffView.tsx';
 import { cmpAddr, functionOffset, mangledNote, padAddr, parseAddress } from '../util.ts';
 
 function Modal({ title, children, onClose }: { title: string; children: React.ReactNode; onClose: () => void }) {
@@ -364,6 +365,7 @@ export function Dialogs() {
       />
     );
   if (dialog.kind === 'bookmarks') return <BookmarksDialog />;
+  if (dialog.kind === 'diffWith') return <DiffPicker />;
   return null;
 }
 

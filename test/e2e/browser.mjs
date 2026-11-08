@@ -658,6 +658,39 @@ return (await or.xrefsTo(s.addr)).length`);
     await page.keyboard.press('Enter');
     await page.waitForSelector('.side-item.renamed:has-text("area")', { timeout: 60000 });
   });
+  await step('binary diff: v1 against v2 from the home screen, changed / renamed / added functions, side by side, go to', async () => {
+    const DIFF = fileURLToPath(new URL('../fixtures/diff/', import.meta.url));
+    for (const v of ['diffme-v1', 'diffme-v2']) {
+      await page.locator('.brand').click();
+      await page.setInputFiles('input[type=file]', DIFF + v);
+      await page.waitForSelector('.row.insn', { timeout: 120000 });
+    }
+    await page.locator('.brand').click();
+    await page.locator('.recent-item', { hasText: 'diffme-v1' }).locator('.act-diff').click();
+    await page.locator('.diff-pick', { hasText: 'diffme-v2' }).click();
+    await page.waitForSelector('.diff-counts', { timeout: 180000 });
+    const counts = await page.locator('.diff-counts').innerText();
+    if (!/0 only in A/.test(counts) || !/1 only in B/.test(counts) || !/\b3 changed/.test(counts)) throw new Error(`counts: ${counts}`);
+    const rows = await page.locator('.diff-body .diff-row').evaluateAll((els) => els.map((e) => [...e.children].map((c) => c.textContent.trim())));
+    const row = (a) => rows.find((r) => r[0].startsWith(`${a} `));
+    for (const f of ['checksum', 'parse_level', 'main']) if (!(row(f)?.[2] < '1.00')) throw new Error(`${f} not changed: ${row(f)}`);
+    if (row('count_words')?.[2] !== '1.00') throw new Error(`count_words: ${row('count_words')}`);
+    // The renamed static function matches by its code.
+    if (!row('helper_add')?.[1].startsWith('add_values') || row('helper_add')[3] !== 'identical code') throw new Error(`helper_add: ${row('helper_add')}`);
+    if (!rows.some((r) => r[0] === '—' && r[1].startsWith('validate_name'))) throw new Error('validate_name is not only in B');
+    // parse_level side by side: v2's new branch shows as added lines.
+    await page.locator('.diff-body .diff-row', { hasText: 'parse_level' }).click();
+    await page.waitForSelector('.diff-line.k-added');
+    if (!(await page.locator('.diff-line.k-added', { hasText: 'cmp' }).count())) throw new Error('no added cmp line');
+    await page.locator('.diff-pair-head .link', { hasText: 'go to' }).click();
+    await page.waitForSelector('.diff-view', { state: 'detached' });
+    await page.waitForFunction(() => document.querySelector('.statusbar')?.textContent?.includes('parse_level'));
+    // The top bar's Diff shows it again; Esc leaves it.
+    await page.locator('.diff-button').click();
+    await page.waitForSelector('.diff-view');
+    await page.keyboard.press('Escape');
+    await page.waitForSelector('.diff-view', { state: 'detached' });
+  });
   if (existsSync(SSHPASS)) await step(`${SSHPASS}: xrefs to the _fprintf stub, search the fprintf call sequence, "Conflicting", immediate 0x862`, async () => {
     await page.locator('.brand').click();
     await page.setInputFiles('input[type=file]', SSHPASS);
