@@ -222,7 +222,7 @@ export function TaskDialog() {
       <div>
         <div className="modal-title">{task.title}</div>
         <div className="task-phase">
-          {p ? (PHASES[p.phase] ?? p.phase) : 'Starting'}
+          {task.abort.signal.aborted ? 'Cancelling' : p ? (PHASES[p.phase] ?? p.phase) : 'Starting'}
           {p?.total ? (
             <span className="dim">
               {' '}
@@ -240,7 +240,15 @@ export function TaskDialog() {
           <span className="dim">
             {elapsed}s{p?.phase === 'decompile' ? ' · other views wait for the current function' : ''}
           </span>
-          <button className="task-cancel" onClick={() => task.abort.abort()}>
+          <button
+            className="task-cancel"
+            disabled={task.abort.signal.aborted}
+            onClick={() => {
+              // The panel stays until the engine has stopped the task (see `settle` in api.ts).
+              task.abort.abort();
+              set({ task: { ...task } });
+            }}
+          >
             Cancel
           </button>
         </div>

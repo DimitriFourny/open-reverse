@@ -325,7 +325,7 @@ function TopBar({ showNav, onToggleNav }: { showNav?: boolean; onToggleNav?: () 
   ];
   return (
     <div className="topbar">
-      <button className="brand" onClick={closeBinary} title="Close binary">
+      <button className="brand" onClick={() => closeBinary()} title="Close binary">
         <span className="logo">⟩_</span> OpenReverse
       </button>
       {info && (

@@ -284,18 +284,33 @@ export function flushEngine(): void {
   if (worker) void call('flush', []).catch(() => undefined);
 }
 
-function call<T>(method: string, args: unknown[], signal?: AbortSignal, transfer: Transferable[] = [], onProgress?: (p: TaskProgress) => void): Promise<T> {
+/**
+ * `settle`: on abort, reject only once the engine has stopped the call. A cancelled export
+ * restarts the project's owner in OpenDecomp; the next task must not start before that ends.
+ */
+function call<T>(
+  method: string,
+  args: unknown[],
+  signal?: AbortSignal,
+  transfer: Transferable[] = [],
+  onProgress?: (p: TaskProgress) => void,
+  settle = false,
+): Promise<T> {
   const w = boot();
   const id = nextId++;
   return new Promise<T>((resolve, reject) => {
-    if (signal?.aborted) return reject(new DOMException('Aborted', 'AbortError'));
+    const aborted = () => reject(new DOMException('Aborted', 'AbortError'));
+    if (signal?.aborted) return aborted();
     pending.set(id, { resolve: resolve as (v: unknown) => void, reject, ...(onProgress ? { onProgress } : {}) });
     signal?.addEventListener(
       'abort',
       () => {
         w.postMessage({ cancel: id });
-        pending.delete(id);
-        reject(new DOMException('Aborted', 'AbortError'));
+        if (settle && pending.has(id)) pending.set(id, { resolve: aborted, reject: aborted });
+        else {
+          pending.delete(id);
+          aborted();
+        }
       },
       { once: true },
     );
@@ -376,15 +391,15 @@ export const api = {
   // ------------------------------------------------- data in / out, storage
   /** A project archive (.orproj.zip) of a binary: the binary, its OpenDecomp project, comments, bookmarks. */
   exportArchive: (bid: string, onProgress?: (p: TaskProgress) => void, signal?: AbortSignal) =>
-    call<{ name: string; bytes: Uint8Array }>('exportArchive', [bid], signal, [], onProgress),
+    call<{ name: string; bytes: Uint8Array }>('exportArchive', [bid], signal, [], onProgress, true),
   /** Restore an archive. A binary that already exists is a `conflict` unless `replace`. */
   importArchive: async (file: File, opts: { replace?: boolean } = {}, onProgress?: (p: TaskProgress) => void, signal?: AbortSignal) => {
     const bytes = new Uint8Array(await file.arrayBuffer());
-    return call<ImportResult>('importArchive', [bytes, opts], signal, [bytes.buffer], onProgress);
+    return call<ImportResult>('importArchive', [bytes, opts], signal, [bytes.buffer], onProgress, true);
   },
   /** A zip of every function's pseudocode plus types.h and indexes (OpenDecomp `export` layout). */
   exportPseudocode: (bid: string, o: Pick<DecompileOptions, 'language' | 'inference'>, onProgress?: (p: TaskProgress) => void, signal?: AbortSignal) =>
-    call<{ name: string; bytes: Uint8Array; summary: PseudocodeExportSummary }>('exportPseudocode', [bid, o], signal, [], onProgress),
+    call<{ name: string; bytes: Uint8Array; summary: PseudocodeExportSummary }>('exportPseudocode', [bid, o], signal, [], onProgress, true),
   /** Bytes stored per binary (IndexedDB), split into binary, project and metadata. */
   storage: () => call<{ binaries: BinaryUsage[] }>('storage', []),
   /** Delete a binary's OpenDecomp project (analysis cache and annotations); keeps the binary and comments. */
