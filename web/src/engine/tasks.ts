@@ -19,7 +19,7 @@ export interface TaskContext {
 }
 
 /** Engine methods that receive a TaskContext as their last argument. */
-export const TASK_METHODS = new Set(['exportArchive', 'importArchive', 'exportPseudocode', 'search']);
+export const TASK_METHODS = new Set(['exportArchive', 'importArchive', 'exportPseudocode', 'search', 'diff']);
 
 /** A context for direct (non-RPC) calls and tests. */
 export function noTask(): TaskContext {

@@ -226,7 +226,9 @@ import type { NavMap, SearchHit, SearchQuery, SearchResult } from './engine/sear
 import type { DataDef, DataType, LinearRow, LinearWindow } from './engine/linear.ts';
 import type { DataAction } from './engine/session.ts';
 import type { EngineMemory } from './engine/memory.ts';
+import type { AlignedRow, DiffFunction, DiffResult, DiffRow, Line } from './engine/bindiff.ts';
 
+export type { AlignedRow, DiffFunction, DiffResult, DiffRow, Line };
 export type { DataAction, DataDef, DataType, LinearRow, LinearWindow, NavMap, SearchHit, SearchQuery, SearchResult, TaskProgress };
 
 type Pending = { resolve: (v: unknown) => void; reject: (e: Error) => void; onProgress?: (p: TaskProgress) => void };
@@ -349,6 +351,12 @@ export const api = {
   search: (bid: string, query: SearchQuery, onProgress?: (p: TaskProgress) => void, signal?: AbortSignal) =>
     call<SearchResult>('search', [bid, query], signal, [], onProgress),
   navMap: (bid: string) => call<NavMap>('navMap', [bid]),
+  /** Diff two stored binaries' functions (a background task: signatures of each, then matching). */
+  diff: (bidA: string, bidB: string, onProgress?: (p: TaskProgress) => void, signal?: AbortSignal) =>
+    call<DiffResult>('diff', [bidA, bidB], signal, [], onProgress),
+  /** Two functions of the last diff, aligned line by line (null: a function only one side has). */
+  diffFunction: (bidA: string, fidA: string | null, bidB: string, fidB: string | null) =>
+    call<{ a: Line[]; b: Line[]; rows: AlignedRow[] }>('diffFunction', [bidA, fidA, bidB, fidB]),
   comments: (bid: string) => call<{ comments: Record<string, string> }>('comments', [bid]),
   rename: (bid: string, target: { id?: string; addr?: string }, name: string) => call<{ revision: number; note: string | null }>('rename', [bid, target, name]),
   /** `annotations`: the library annotation of each declared name. */

@@ -7,6 +7,7 @@
 //   /workspace/meta/<id>.data.json       WorkspaceData: data definitions and listing names
 //   /workspace/binaries/<id>/<name>      the binary          (loaded on open)
 //   /workspace/binaries/<id>/project/    OpenDecomp cache root
+//   /workspace/binaries/<id>/diffsig-v<V>-r<revision>.json   binary diff signatures (bindiff.ts)
 
 import { sha256 } from '@noble/hashes/sha2.js';
 import type { DataDef } from './linear.ts';
@@ -90,6 +91,21 @@ export class Workspace {
 
   projectRoot(id: string): string {
     return `${this.dir(id)}/project`;
+  }
+
+  /** The binary diff signature table of a project revision. */
+  diffSigPath(id: string, version: number, revision: number): string {
+    return `${this.dir(id)}/diffsig-v${version}-r${revision}.json`;
+  }
+
+  /** Stored diff signature tables, newest revision first, whether or not the binary is loaded. */
+  async diffSigs(id: string): Promise<{ path: string; version: number; revision: number }[]> {
+    const out = [];
+    for (const name of await vfs.listStored(this.dir(id))) {
+      const m = /^diffsig-v(\d+)-r(\d+)\.json$/.exec(name);
+      if (m) out.push({ path: `${this.dir(id)}/${name}`, version: Number(m[1]), revision: Number(m[2]) });
+    }
+    return out.sort((a, b) => b.revision - a.revision);
   }
 
   /** Load a binary's files into memory before OpenDecomp opens it. */

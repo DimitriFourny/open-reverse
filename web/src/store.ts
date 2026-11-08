@@ -64,6 +64,8 @@ export type Dialog =
   | { kind: 'bookmark'; addr: string; current: string | null }
   /** Ctrl+M: the bookmark list. */
   | { kind: 'bookmarks' }
+  /** Pick the other binary to diff the open one with. */
+  | { kind: 'diffWith' }
   | { kind: 'open' };
 
 export type XrefTarget = { id?: string; addr?: string };

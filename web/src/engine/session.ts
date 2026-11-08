@@ -36,6 +36,7 @@ import { objcComment, objcItems, objcLabel, objcMessage, objcRelabels, type ObjC
 import { vfs } from './vfs.ts';
 import { buildNavMap, runSearch, SearchError, type NavKind, type NavMap, type Region, type SearchQuery, type SearchResult } from './search.ts';
 import type { TaskContext } from './tasks.ts';
+import { functionSignature, type FunctionSig } from './bindiff.ts';
 import type { BinaryRecord, Workspace } from './workspace.ts';
 
 /** The largest budget OpenDecomp accepts: discovery of a real binary needs it. */
@@ -446,7 +447,17 @@ export class AnalysisSession {
       indexState,
     };
     this.#functions = index;
+    this.#dropStaleDiffSigs(revision);
     return index;
+  }
+
+  /** Diff signature tables of another revision are stale: an edit or a discovery step changed the functions. */
+  #dropStaleDiffSigs(revision: number): void {
+    const dir = this.#workspace.dir(this.record.id);
+    for (const name of vfs.get(dir) ? vfs.readdir(dir) : []) {
+      const m = /^diffsig-v\d+-r(\d+)\.json$/.exec(name);
+      if (m && Number(m[1]) !== revision) vfs.unlink(`${dir}/${name}`);
+    }
   }
 
   readonly #demangledNames = new Map<string, string | null>();
@@ -1453,6 +1464,27 @@ export class AnalysisSession {
   async readBytes(addr: bigint, length: number): Promise<{ start: bigint; bytes: Uint8Array }[]> {
     const mem = await this.memory(canon(addr), length);
     return mem.segments.flatMap((s) => (s.hex ? [{ start: BigInt(s.start), bytes: hexBytes(s.hex) }] : []));
+  }
+
+  /**
+   * Every function's binary diff signature (bindiff.ts), built from its listing (import stubs
+   * left out). A listing already made at this revision is reused; the others are not cached,
+   * so the walk does not evict what the views show.
+   */
+  async diffSignatures(ctx: TaskContext, phase: string): Promise<FunctionSig[]> {
+    const index = await this.functions();
+    const fns = index.list.filter((f) => !f.importStub).sort((a, b) => cmpBig(a.entry, b.entry));
+    const out: FunctionSig[] = [];
+    for (const [n, fn] of fns.entries()) {
+      ctx.signal.throwIfAborted();
+      ctx.progress({ phase, done: n, total: fns.length, detail: fn.name });
+      const listed = this.#listings?.revision === index.revision ? (this.#listings.map.get(fn.id) ?? null) : null;
+      // A function OpenDecomp cannot disassemble still takes part, by its name and size.
+      const core = await (listed ?? this.#buildListing(fn.id, true)).catch((): ListingCore => ({ function: fn, instructions: [], blocks: [], gaps: [] }));
+      out.push(functionSignature(core, (entry) => index.byEntry.get(entry)));
+    }
+    ctx.progress({ phase, done: fns.length, total: fns.length });
+    return out;
   }
 
   /** Per-function instruction text for the immediate search, at one revision (capped). */

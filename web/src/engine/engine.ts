@@ -12,6 +12,7 @@ import { autoThreads, deviceMemory, jsHeapUsed, type EngineMemory } from './memo
 import { sqliteHeapBytes } from './shims/sqlite.ts';
 import type { DataDef } from './linear.ts';
 import { Workspace, type BinaryRecord } from './workspace.ts';
+import { alignLines, DIFFSIG_VERSION, diffRows, matchFunctions, type DiffResult, type DiffSide, type FunctionSig } from './bindiff.ts';
 
 type Target = { id?: string; addr?: string };
 type DecompileOptions = { language: 'c-like' | 'python-like'; inference: 'proven' | 'likely'; view: 'source' | 'checked' };
@@ -51,14 +52,14 @@ export class Engine {
     return { threads: this.threads, applies: 'next-open' };
   }
 
-  #session(id: string): Promise<AnalysisSession> {
+  #session(id: string, threads = this.threads): Promise<AnalysisSession> {
     let s = this.#sessions.get(id);
     if (!s) {
       s = (async () => {
         const record = this.workspace.get(id);
         if (!record) throw new ApiError(404, `Unknown binary ${id}`);
         await this.workspace.load(id);
-        return AnalysisSession.open(this.workspace, record, this.threads);
+        return AnalysisSession.open(this.workspace, record, threads);
       })();
       this.#sessions.set(id, s);
       s.catch(() => this.#sessions.delete(id));
@@ -172,6 +173,7 @@ export class Engine {
     await this.#closeSession(bid);
     await vfs.flush();
     await vfs.removeTree(this.workspace.projectRoot(bid));
+    for (const sig of await this.workspace.diffSigs(bid)) await vfs.removeTree(sig.path);
     // Names and declared types were annotations in that project; data definitions stay in the listing.
     const data = await this.workspace.data(bid);
     await this.workspace.setData(bid, { defs: Object.fromEntries(Object.entries(data.defs).map(([k, d]) => [k, { type: d.type, count: d.count }])), names: {} });
@@ -273,6 +275,107 @@ export class Engine {
   /** The navigation strip's map of the image. */
   async navMap(bid: string) {
     return (await this.#session(bid)).navMap();
+  }
+
+  // ---------------------------------------------------------- binary diff
+
+  /** The signature tables of the last diff, by binary id. */
+  readonly #sigTables = new Map<string, { revision: number; sigs: FunctionSig[] }>();
+
+  /**
+   * Diff the functions of two stored binaries: each one's signature table (from the cache, or
+   * built from every function's listing), then the matching (bindiff.ts).
+   */
+  async diff(bidA: string, bidB: string, ctx: TaskContext): Promise<DiffResult> {
+    if (bidA === bidB) throw new ApiError(400, 'Pick two different binaries');
+    const a = await this.#diffSide(bidA, ctx, 'A');
+    const b = await this.#diffSide(bidB, ctx, 'B');
+    for (const id of this.#sigTables.keys()) if (id !== bidA && id !== bidB) this.#sigTables.delete(id);
+    ctx.progress({ phase: 'match', done: 0, total: null });
+    const started = Date.now();
+    const result = matchFunctions(a.sigs, b.sigs);
+    return { a: a.side, b: b.side, ...diffRows(a.sigs, b.sigs, result), matchMs: Date.now() - started };
+  }
+
+  /** Two functions of the last diff side by side (either may be null: a function only one binary has). */
+  async diffFunction(bidA: string, fidA: string | null, bidB: string, fidB: string | null) {
+    const lines = (bid: string, fid: string | null) => {
+      if (fid === null) return [];
+      const table = this.#sigTables.get(bid);
+      if (!table) throw new ApiError(409, 'The diff is gone (the engine restarted): run it again');
+      const sig = table.sigs.find((f) => f.id === fid);
+      if (!sig) throw new ApiError(404, `Unknown function ${fid}`);
+      return sig.lines;
+    };
+    const a = lines(bidA, fidA);
+    const b = lines(bidB, fidB);
+    return { a, b, rows: alignLines(a, b) };
+  }
+
+  /**
+   * One binary's signature table. A binary that is not open is opened only when no table
+   * is stored, with one worker, and closed again after: two projects are never kept open
+   * for a diff. A stored table is valid for its revision: the session drops the others.
+   */
+  async #diffSide(bid: string, ctx: TaskContext, label: string): Promise<{ sigs: FunctionSig[]; side: DiffSide }> {
+    const record = this.workspace.get(bid);
+    if (!record) throw new ApiError(404, `Unknown binary ${bid}`);
+    const started = Date.now();
+    const side = (sigs: FunctionSig[], cached: boolean) => ({
+      sigs,
+      side: { bid, name: record.name, functions: sigs.length, cached, ms: Date.now() - started },
+    });
+    const wasOpen = this.#sessions.has(bid);
+    if (!wasOpen) {
+      ctx.progress({ phase: `load ${label}`, done: 0, total: null, detail: record.name });
+      const stored = (await this.workspace.diffSigs(bid)).find((t) => t.version === DIFFSIG_VERSION);
+      const sigs = stored && (await this.#readSigs(bid, stored.path, stored.revision, false));
+      if (sigs) return side(sigs, true);
+    }
+    ctx.progress({ phase: `open ${label}`, done: 0, total: null, detail: record.name });
+    const s = await this.#session(bid, wasOpen ? this.threads : 1);
+    try {
+      // Whole-image discovery first: the signatures are of the complete function list.
+      while (s.discovery.state === 'running' || s.discovery.state === 'idle') {
+        ctx.signal.throwIfAborted();
+        ctx.progress({ phase: `discover ${label}`, done: (await s.functions()).list.length, total: null, detail: record.name });
+        await new Promise((r) => setTimeout(r, 500));
+      }
+      const revision = s.binary.revision;
+      const path = this.workspace.diffSigPath(bid, DIFFSIG_VERSION, revision);
+      const cached = await this.#readSigs(bid, path, revision, true);
+      if (cached) return side(cached, true);
+      const sigs = await s.diffSignatures(ctx, `signatures ${label}`);
+      if (s.binary.revision === revision) {
+        vfs.write(path, new TextEncoder().encode(JSON.stringify(sigs)));
+        this.#sigTables.set(bid, { revision, sigs });
+      }
+      return side(sigs, false);
+    } finally {
+      if (!wasOpen) {
+        await this.#closeSession(bid);
+        await vfs.flush();
+        await this.workspace.unload(bid);
+      }
+    }
+  }
+
+  /** A stored signature table (null when absent or unreadable); `loaded`: the binary's files are in memory. */
+  async #readSigs(bid: string, path: string, revision: number, loaded: boolean): Promise<FunctionSig[] | null> {
+    const held = this.#sigTables.get(bid);
+    if (held?.revision === revision) return held.sigs;
+    loaded ||= vfs.isMounted(path);
+    if (!loaded) await vfs.mount(path);
+    try {
+      if (!vfs.get(path)) return null;
+      const sigs = JSON.parse(new TextDecoder().decode(vfs.read(path))) as FunctionSig[];
+      this.#sigTables.set(bid, { revision, sigs });
+      return sigs;
+    } catch {
+      return null;
+    } finally {
+      if (!loaded) await vfs.unmount(path);
+    }
   }
 
   async comments(bid: string) {
