@@ -1,5 +1,6 @@
 // C function prototypes ("int parse(struct Node *n, char *s)") compiled into an
-// OpenDecomp `signature` annotation value.
+// OpenDecomp `signature` annotation value, and C type names ("struct Node *") into the
+// type a variable or global is bound to.
 //
 // OpenDecomp has no prototype parser: its C declaration parser
 // (src/metadata/c-declarations, the one behind `types_declare`) parses
@@ -177,39 +178,36 @@ export function splitPrototype(text: string): { name: string; returns: string; p
   return { name: nameMatch[1]!, returns, parameters, variadic };
 }
 
-/** Compiles a C prototype for the given parser and type identities. */
-export function compilePrototype(text: string, parse: Parser, ids: TypeIds): CompiledPrototype {
-  const proto = splitPrototype(text);
-  const members = proto.parameters.map((p, i) => parameterMember(p, i));
-  const names = members.map((m) => m.name).filter((n): n is string => n !== null);
-  const dup = names.find((n, i) => names.indexOf(n) !== i);
-  if (dup) throw new PrototypeError(`Parameter '${dup}' is declared twice`);
-  if (names.some((n) => n.startsWith(PREFIX))) throw new PrototypeError(`Names starting with ${PREFIX} are reserved`);
-  const body = [`${proto.returns} *${PREFIX}ret;`, ...members.map((m) => `${m.member};`)].join(' ');
 
+/**
+ * Parses structure member declarations (`members`, without the braces) and resolves
+ * their types to OpenDecomp type IDs. `typeText` is the C text whose struct/union/enum
+ * tags and typedef names refer to the type library.
+ */
+function compileMembers(members: string, typeText: string, parse: Parser, ids: TypeIds) {
   // Named types are references to the type library: give each a complete stub so
   // the parser accepts them by value or by pointer; only their names are used.
   const stubs = new Map<string, string>();
-  for (const m of `${proto.returns} ${proto.parameters.join(' ')}`.matchAll(/\b(struct|union|enum)\s+([A-Za-z_][A-Za-z0-9_]*)/g)) {
+  for (const m of typeText.matchAll(/\b(struct|union|enum)\s+([A-Za-z_][A-Za-z0-9_]*)/g)) {
     const [, tag, name] = m;
     stubs.set(`${tag} ${name}`, tag === 'enum' ? `enum ${name} { ${PREFIX}e_${name} };` : `${tag} ${name} { unsigned char ${PREFIX}stub; };`);
   }
   let parsed: ParseResult | null = null;
   for (let attempt = 0; attempt < 64; attempt++) {
-    const source = `${[...stubs.values()].join('\n')}\nstruct ${PREFIX}sig { ${body} };`;
+    const source = `${[...stubs.values()].join('\n')}\nstruct ${PREFIX}sig { ${members} };`;
     parsed = parse(source);
     const unknown = parsed.diagnostics
       .map((d) => /^unknown type name '([A-Za-z_][A-Za-z0-9_]*)'/.exec(d.message)?.[1])
       .filter((n): n is string => !!n && !stubs.has(`typedef ${n}`));
     if (unknown.length === 0) break;
     // A typedef name: refer to the library type of that name.
-    // (`typedef struct Node Node` when the prototype also names the tag.)
+    // (`typedef struct Node Node` when the text also names the tag.)
     for (const n of unknown) {
       const tag = ['struct', 'union', 'enum'].find((t) => stubs.has(`${t} ${n}`));
       stubs.set(`typedef ${n}`, tag ? `typedef ${tag} ${n} ${n};` : `typedef unsigned char ${n};`);
     }
   }
-  if (!parsed) throw new PrototypeError('Could not parse the prototype');
+  if (!parsed) throw new PrototypeError('Could not parse the type');
   if (parsed.diagnostics.length) {
     const messages = [...new Set(parsed.diagnostics.map((d) => d.message.replaceAll(PREFIX, '')))];
     throw new PrototypeError(messages.join('\n'));
@@ -217,9 +215,7 @@ export function compilePrototype(text: string, parse: Parser, ids: TypeIds): Com
 
   const byKey = new Map(parsed.types.map((t) => [t.key, t]));
   const sig = parsed.types.find((t) => t.name === `${PREFIX}sig`);
-  if (!sig || sig.definition.kind !== 'structure') throw new PrototypeError('Could not parse the prototype');
-  const fields = sig.definition.fields;
-  if (fields.length !== members.length + 1) throw new PrototypeError('Could not parse the parameter list');
+  if (!sig || sig.definition.kind !== 'structure') throw new PrototypeError('Could not parse the type');
 
   const declarations = new Map<string, TypeDefinition>();
   const namedTypes = new Set<string>();
@@ -233,7 +229,7 @@ export function compilePrototype(text: string, parse: Parser, ids: TypeIds): Com
     const t = byKey.get(key);
     if (!t) throw new PrototypeError(`Unresolved type ${key}`);
     if (t.name !== null) {
-      if (t.name.startsWith(PREFIX)) throw new PrototypeError('Unsupported type in the prototype');
+      if (t.name.startsWith(PREFIX)) throw new PrototypeError('Unsupported type');
       namedTypes.add(t.name);
       return ids.named(t.name);
     }
@@ -252,11 +248,30 @@ export function compilePrototype(text: string, parse: Parser, ids: TypeIds): Com
       case 'vector':
         return local({ kind: 'vector', element: resolve(d.element, depth + 1), lanes: d.lanes });
       case 'structure':
-        throw new PrototypeError('Anonymous structures and unions cannot appear in a prototype: declare them by name in the Types view');
+        throw new PrototypeError('Anonymous structures and unions are not supported here: declare them by name in the Types view');
       default:
         return local(d);
     }
   };
+  return { fields: sig.definition.fields, byKey, resolve, local, declarations, namedTypes };
+}
+
+/** Compiles a C prototype for the given parser and type identities. */
+export function compilePrototype(text: string, parse: Parser, ids: TypeIds): CompiledPrototype {
+  const proto = splitPrototype(text);
+  const members = proto.parameters.map((p, i) => parameterMember(p, i));
+  const names = members.map((m) => m.name).filter((n): n is string => n !== null);
+  const dup = names.find((n, i) => names.indexOf(n) !== i);
+  if (dup) throw new PrototypeError(`Parameter '${dup}' is declared twice`);
+  if (names.some((n) => n.startsWith(PREFIX))) throw new PrototypeError(`Names starting with ${PREFIX} are reserved`);
+  const body = [`${proto.returns} *${PREFIX}ret;`, ...members.map((m) => `${m.member};`)].join(' ');
+  const { fields, byKey, resolve, local, declarations, namedTypes } = compileMembers(
+    body,
+    `${proto.returns} ${proto.parameters.join(' ')}`,
+    parse,
+    ids,
+  );
+  if (fields.length !== members.length + 1) throw new PrototypeError('Could not parse the parameter list');
   const ret = byKey.get(fields[0]!.type_id);
   if (!ret || ret.definition.kind !== 'pointer') throw new PrototypeError('Could not parse the return type');
   const returnType = resolve(ret.definition.to);
@@ -272,4 +287,43 @@ export function compilePrototype(text: string, parse: Parser, ids: TypeIds): Com
     return { name: m.name, type };
   });
   return { name: proto.name, returnType, parameters, variadic: proto.variadic, declarations, namedTypes: [...namedTypes] };
+}
+
+export interface CompiledType {
+  /** The type ID to bind a variable or global to. */
+  type: string;
+  /** Anonymous types it needs, by ID. */
+  declarations: Map<string, TypeDefinition>;
+  /** Named types it refers to (they must be in the type library). */
+  namedTypes: string[];
+}
+
+/**
+ * Compiles a C type name (`struct Node *`, `char *`, `uint32_t[8]`, `void (*)(int)`) for a
+ * variable or a global. Unlike a parameter, an array keeps its array type.
+ */
+export function compileType(text: string, parse: Parser, ids: TypeIds): CompiledType {
+  const t = clean(text);
+  if (!t) throw new PrototypeError('Empty type');
+  const name = `${PREFIX}v`;
+  let member: string;
+  if (t.includes('(')) {
+    // A function pointer: the name goes in its `(*)`.
+    if (!/\(\s*\*\s*\)/.test(t)) throw new PrototypeError('Expected a type such as `struct Node *`, `char *` or `uint32_t[8]`');
+    member = t.replace(/\(\s*\*\s*\)/, `(*${name})`);
+  } else {
+    const array = /^(.*?)\s*((?:\[[^\]]*\]\s*)+)$/.exec(t);
+    member = array ? `${array[1]} ${name}${array[2]!.replace(/\s+/g, '')}` : `${t} ${name}`;
+  }
+  let compiled;
+  try {
+    compiled = compileMembers(`${member};`, t, parse, ids);
+  } catch (error) {
+    if (error instanceof PrototypeError) throw new PrototypeError(error.message.replaceAll("member 'v'", 'the variable'));
+    throw error;
+  }
+  const { fields, byKey, resolve, declarations, namedTypes } = compiled;
+  if (fields.length !== 1) throw new PrototypeError('Expected one type, without a variable name');
+  if (byKey.get(fields[0]!.type_id)?.definition.kind === 'void') throw new PrototypeError('A variable cannot have type void');
+  return { type: resolve(fields[0]!.type_id), declarations, namedTypes: [...namedTypes] };
 }

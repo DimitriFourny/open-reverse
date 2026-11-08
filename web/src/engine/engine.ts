@@ -314,6 +314,29 @@ export class Engine {
     return result;
   }
 
+  async setVariableType(bid: string, fid: string, valueId: string, text: string, options: DecompileOptions) {
+    if (typeof text !== 'string') throw new ApiError(400, 'Missing type');
+    const result = await (await this.#session(bid)).setVariableType(fid, String(valueId), text, options);
+    void vfs.flush();
+    return result;
+  }
+
+  async setGlobalType(bid: string, a: string, text: string) {
+    if (typeof text !== 'string') throw new ApiError(400, 'Missing type');
+    const result = await (await this.#session(bid)).setGlobalType(addr(a), text);
+    void vfs.flush();
+    return result;
+  }
+
+  async structFromVariable(bid: string, fid: string, variable: string, name: string, options: DecompileOptions) {
+    return (await this.#session(bid)).structFromVariable(fid, String(variable), String(name), options);
+  }
+
+  async layoutStructure(bid: string, source: string, name: string, library: string[]) {
+    if (typeof source !== 'string' || !Array.isArray(library)) throw new ApiError(400, 'Missing source');
+    return (await this.#session(bid)).layoutStructure(source, String(name), library.map(String));
+  }
+
   async comment(bid: string, a: string, text: string) {
     const comments = await (await this.#session(bid)).comment(addr(a), String(text ?? ''));
     void vfs.flush();

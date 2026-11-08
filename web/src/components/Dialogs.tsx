@@ -1,5 +1,20 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { defineData, loadSidebar, navigate, rename, renameVariable, setBookmark, setComment, setSignature, setState, toast, useStore, type Dialog } from '../store.ts';
+import {
+  createStructFromVariable,
+  defineData,
+  loadSidebar,
+  navigate,
+  rename,
+  renameVariable,
+  setBookmark,
+  setComment,
+  setSignature,
+  setState,
+  setType,
+  toast,
+  useStore,
+  type Dialog,
+} from '../store.ts';
 import { cmpAddr, functionOffset, padAddr, parseAddress } from '../util.ts';
 
 function Modal({ title, children, onClose }: { title: string; children: React.ReactNode; onClose: () => void }) {
@@ -50,8 +65,11 @@ function GotoDialog() {
     return scored.sort((a, b) => a[0] - b[0]).slice(0, 50).map(([, f]) => f);
   }, [text, targets]);
   const addr = parseAddress(text);
+  // Enter before the symbol list arrived: go once it is there (a data symbol may match).
+  const [waiting, setWaiting] = useState(false);
   const go = (i: number) => {
     const f = matches[i];
+    if (!f && !addr && !symbols) return setWaiting(true);
     if (f && (!addr || f.name.toLowerCase() === text.trim().toLowerCase())) {
       close();
       void navigate(f.entry, f.fnId ? { fnId: f.fnId } : {});
@@ -60,6 +78,11 @@ function GotoDialog() {
       void navigate(addr);
     } else toast('No such function or address', 'error');
   };
+  useEffect(() => {
+    if (!waiting || !symbols) return;
+    setWaiting(false);
+    go(0);
+  }, [waiting, symbols]); // eslint-disable-line react-hooks/exhaustive-deps
   return (
     <Modal title="Go to address or function" onClose={close}>
       <input
@@ -184,6 +207,74 @@ function SignatureDialog({ dialog }: { dialog: Extract<Dialog, { kind: 'signatur
   );
 }
 
+/** One-line input applied by an async edit that may fail: the error stays in the dialog. */
+function ApplyDialog({
+  title,
+  initial,
+  placeholder,
+  hint,
+  resetLabel,
+  onApply,
+}: {
+  title: string;
+  initial: string;
+  placeholder: string;
+  hint: React.ReactNode;
+  /** A button applying the empty text. */
+  resetLabel?: string;
+  onApply: (v: string) => Promise<string | null>;
+}) {
+  const [text, setText] = useState(initial);
+  const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const ref = useRef<HTMLInputElement>(null);
+  useEffect(() => {
+    ref.current?.focus();
+    ref.current?.select();
+  }, []);
+  const apply = async (value: string) => {
+    setBusy(true);
+    setError(null);
+    const err = await onApply(value);
+    setBusy(false);
+    if (err) setError(err);
+    else close();
+  };
+  return (
+    <Modal title={title} onClose={close}>
+      <input
+        ref={ref}
+        className="modal-input"
+        value={text}
+        spellCheck={false}
+        disabled={busy}
+        placeholder={placeholder}
+        onChange={(e) => setText(e.target.value)}
+        onKeyDown={(e) => e.key === 'Enter' && void apply(text)}
+      />
+      {error && <pre className="form-error">{error}</pre>}
+      <div className="modal-foot">
+        <span className="dim">{hint}</span>
+        {resetLabel && (
+          <button disabled={busy} onClick={() => void apply('')}>
+            {resetLabel}
+          </button>
+        )}
+        <button onClick={close}>Cancel</button>
+        <button className="primary" disabled={busy} onClick={() => void apply(text)}>
+          {busy ? 'Applying…' : 'Apply'}
+        </button>
+      </div>
+    </Modal>
+  );
+}
+
+/** A structure name from a variable name: `address` -> `Address`. */
+function structName(variable: string): string {
+  const n = variable.replace(/^_+/, '').replace(/_([a-z])/g, (_, c: string) => c.toUpperCase());
+  return n ? n[0]!.toUpperCase() + n.slice(1) : 'Struct';
+}
+
 export function Dialogs() {
   const dialog = useStore((s) => s.dialog);
   if (!dialog) return null;
@@ -218,6 +309,27 @@ export function Dialogs() {
           if (!Number.isSafeInteger(n) || n < 1) return toast('An array needs a positive element count', 'error');
           void defineData('array', n, dialog.addr);
         }}
+      />
+    );
+  if (dialog.kind === 'retype')
+    return (
+      <ApplyDialog
+        title={`Type of ${dialog.what}`}
+        initial={dialog.current}
+        placeholder="struct Node *, char *, uint32_t[8]"
+        hint="C type. struct, union, enum and typedef names come from the type library (Types view). Stored as an asserted OpenDecomp type annotation."
+        resetLabel="Reset"
+        onApply={(v) => setType(dialog.target, v, dialog.what, dialog.current || null)}
+      />
+    );
+  if (dialog.kind === 'createStruct')
+    return (
+      <ApplyDialog
+        title={`Create a structure from ${dialog.variable}${dialog.type ? ` (${dialog.type})` : ''}`}
+        initial={structName(dialog.variable)}
+        placeholder="Name"
+        hint={`Declares struct <name> with the members OpenDecomp recovered at the offsets this function accesses through ${dialog.variable}, then retypes ${dialog.variable} as struct <name> *.`}
+        onApply={(v) => createStructFromVariable(dialog.fnId, dialog.valueId, dialog.variable, v)}
       />
     );
   if (dialog.kind === 'comment')

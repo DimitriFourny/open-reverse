@@ -40,6 +40,13 @@ export const DATA_TYPES: readonly DataType[] = ['u8', 'u16', 'u32', 'u64', 'ptr'
 const ELEMENT_SIZE = { u8: 1, u16: 2, u32: 4, u64: 8, ptr: 8, string: 1 } as const;
 const DIRECTIVE = { 1: 'db', 2: 'dw', 4: 'dd', 8: 'dq' } as Record<number, string>;
 
+const C_NAMES = { u8: 'uint8_t', u16: 'uint16_t', u32: 'uint32_t', u64: 'uint64_t', ptr: 'void *', string: 'char' } as const;
+
+/** A definition as a C type: `uint32_t`, `uint8_t[16]`, `char[6]`, `void *`. */
+export function cType(def: DataDef): string {
+  return def.type === 'string' || def.count > 1 ? `${C_NAMES[def.type]}[${def.count}]` : C_NAMES[def.type];
+}
+
 export function elementSize(type: DataType): number {
   return ELEMENT_SIZE[type];
 }
@@ -107,6 +114,8 @@ export type LinearRow =
       comment: string | null;
       /** What defines it: a user definition, an automatic item (string, pointer), or nothing (undefined bytes). */
       def: DataType | 'auto' | null;
+      /** The item's C type, on its first row (`uint32_t[4]`, `char[6]`, `void *`); null for undefined bytes. */
+      ctype: string | null;
     };
 
 export interface LinearWindow {
@@ -365,9 +374,9 @@ export class LinearListing {
     const at = hex(u.start);
     const size = Number(u.end - u.start);
     if (u.fill === 'zero')
-      return [{ kind: 'data', addr: at, size, unit: at, directive: 'db', text: `${hex(size)} dup(?)`, ref: null, comment: null, def: null }];
+      return [{ kind: 'data', addr: at, size, unit: at, directive: 'db', text: `${hex(size)} dup(?)`, ref: null, comment: null, def: null, ctype: null }];
     if (u.fill === 'run')
-      return [{ kind: 'data', addr: at, size, unit: at, directive: 'db', text: `${hex(size)} dup(0)`, ref: null, comment: null, def: null }];
+      return [{ kind: 'data', addr: at, size, unit: at, directive: 'db', text: `${hex(size)} dup(0)`, ref: null, comment: null, def: null, ctype: null }];
     return [bytesRow(at, at, await this.#src.read(u.start, size))];
   }
 
@@ -387,7 +396,7 @@ export class LinearListing {
       text = ref?.label || hex(item.target);
       if (!ref) ref = { addr: hex(item.target), kind: 'data', label: '' };
     } else text = hex(readUint(await this.#src.read(item.start, size)));
-    return { kind: 'data', addr: at, size, unit: at, directive, text, ref, comment, def: 'auto' };
+    return { kind: 'data', addr: at, size, unit: at, directive, text, ref, comment, def: 'auto', ctype: size === 8 ? 'void *' : `uint${size * 8}_t` };
   }
 
   async #defRows(item: Extract<LayoutItem, { kind: 'def' }>): Promise<LinearRow[]> {
@@ -397,7 +406,7 @@ export class LinearListing {
     const bytes = await this.#src.read(item.start, total);
     if (def.type === 'string') {
       const text = cString(bytes.subarray(0, bytes[total - 1] === 0 ? total - 1 : total));
-      return [{ kind: 'data', addr: unit, size: total, unit, directive: 'db', text: `${text}${bytes[total - 1] === 0 ? ', 0' : ''}`, ref: null, comment: null, def: 'string' }];
+      return [{ kind: 'data', addr: unit, size: total, unit, directive: 'db', text: `${text}${bytes[total - 1] === 0 ? ', 0' : ''}`, ref: null, comment: null, def: 'string', ctype: cType(def) }];
     }
     const size = elementSize(def.type);
     const perRow = def.type === 'ptr' ? 1 : Math.max(1, 16 / size);
@@ -424,6 +433,7 @@ export class LinearListing {
         ref,
         comment: i === 0 && def.count > 1 ? `${def.type}[${def.count}]` : null,
         def: def.type,
+        ctype: i === 0 ? cType(def) : null,
       });
     }
     return rows;
@@ -524,7 +534,7 @@ function bytesRow(addr: string, unit: string, b: Uint8Array): LinearRow {
     ascii += p ? String.fromCharCode(x) : '.';
   }
   // Their characters, when the row holds some text.
-  return { kind: 'data', addr, size: b.length, unit, directive: 'db', text, ref: null, comment: printable >= 4 ? ascii : null, def: null };
+  return { kind: 'data', addr, size: b.length, unit, directive: 'db', text, ref: null, comment: printable >= 4 ? ascii : null, def: null, ctype: null };
 }
 
 const MAX_TEXT = 200;
@@ -560,6 +570,7 @@ function stringRow(item: Extract<LayoutItem, { kind: 'string' }>, at: string): L
     ref: null,
     comment: null,
     def: 'auto',
+    ctype: wide ? `uint16_t[${Math.ceil(Number(item.end - item.start) / 2)}]` : `char[${Number(item.end - item.start)}]`,
   };
 }
 

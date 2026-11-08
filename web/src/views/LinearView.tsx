@@ -162,6 +162,21 @@ function rowText(row: LinearRow, width: number, showBytes: boolean, comments: Re
   }
 }
 
+/**
+ * The selection of a data item: its address, its label (N's current name) and, as a global,
+ * its C type (Y retypes it like a global of the pseudocode).
+ */
+function dataSelection(rows: LinearRow[], index: number, unit: string): Selection {
+  const name = labelOf(rows, index, unit);
+  let type = '';
+  for (let i = index; i >= 0 && i > index - 64; i--) {
+    const r = rows[i]!;
+    if (r.kind === 'data' && r.addr === unit) type = r.ctype ?? '';
+    if (BigInt(r.addr) < BigInt(unit)) break;
+  }
+  return { kind: 'addr', addr: unit, ...(name ? { name } : {}), global: { name: name ?? '', type } };
+}
+
 /** The data label naming the item of `row` (for N's current name), searched just above it. */
 function labelOf(rows: LinearRow[], index: number, unit: string): string | undefined {
   for (let i = index; i >= 0 && i > index - 64; i--) {
@@ -337,15 +352,18 @@ export function LinearView() {
   const cursorRow = cursor !== undefined ? rowHolding(rows, starts, BigInt(cursor)) : -1;
   const select = (row: InsnRow | DataRow, index: number) => {
     if (row.kind === 'insn') setCursor(row.addr, null, row.fnId);
-    else setCursor(row.addr, { kind: 'addr', addr: row.unit, name: labelOf(rows, index, row.unit) } satisfies Selection);
+    else setCursor(row.addr, dataSelection(rows, index, row.unit));
   };
-  // A cursor that lands on data (Go to, history) selects that item, so N and X act on it.
-  const selectionNull = useStore((s) => s.selection === null);
+  // A cursor that lands on data (Go to, history) selects that item, so N, X and Y act on it;
+  // a redefinition or rename of the item refreshes it (its label and C type).
+  const selection = useStore((s) => s.selection);
   useEffect(() => {
     const row = rows[cursorRow];
-    if (selectionNull && row?.kind === 'data' && cursor === getState().loc?.addr)
-      setState({ selection: { kind: 'addr', addr: row.unit, name: labelOf(rows, cursorRow, row.unit) } });
-  }, [cursorRow, rows, selectionNull]); // eslint-disable-line react-hooks/exhaustive-deps
+    if (row?.kind !== 'data') return;
+    if (selection !== null && !(selection.kind === 'addr' && selection.addr === row.unit && 'global' in selection)) return;
+    const next = dataSelection(rows, cursorRow, row.unit);
+    if (JSON.stringify(next) !== JSON.stringify(selection)) setState({ selection: next });
+  }, [cursorRow, rows, selection]); // eslint-disable-line react-hooks/exhaustive-deps
   const moveTo = (i: number, dir: 1 | -1) => {
     for (let k = Math.max(0, Math.min(rows.length - 1, i)); k >= 0 && k < rows.length; k += dir) {
       const r = rows[k]!;
@@ -429,7 +447,6 @@ export function LinearView() {
   const items = virt.getVirtualItems();
   const first = items[0]?.index ?? 0;
   const last = items.at(-1)?.index ?? 0;
-  const selection = useStore((s) => s.selection);
   if (error && !win) return <div className="placeholder error">{error}</div>;
   if (!win) return <div className="placeholder">Loading the listing…</div>;
   return (
@@ -477,7 +494,7 @@ export function LinearView() {
                   data-row={index}
                   style={style}
                   className={`row${row.fnId && row.fnId === fnId ? ' cur-fn' : ''}`}
-                  onClick={row.fnId ? undefined : () => setCursor(row.addr, { kind: 'addr', addr: row.addr, name: row.name })}
+                  onClick={row.fnId ? undefined : () => setCursor(row.addr, dataSelection(rows, Math.min(rows.length - 1, index + 1), row.addr))}
                 >
                   {at}
                   <span className={`label${row.fnId ? '' : ' label-data'}${selected ? ' selected' : ''}`} data-k={`i:${row.name}`}>

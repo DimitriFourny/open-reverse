@@ -37,10 +37,16 @@ export interface Location {
 /** What N (rename) and X (xrefs) act on. */
 export type Selection =
   | { kind: 'function'; fnId: string }
-  /** An address: an operand target, or a data item of the listing (`name`: its label). */
-  | { kind: 'addr'; addr: string; name?: string }
-  /** A parameter or local of the pseudocode (N renames it). */
-  | { kind: 'variable'; fnId: string; id: string; name: string; parameter: boolean };
+  /**
+   * An address: an operand target, or a data item of the listing (`name`: its label);
+   * `global`: a global the pseudocode names, with its declared C type (Y retypes it).
+   */
+  | { kind: 'addr'; addr: string; name?: string; global?: { name: string; type: string } }
+  /** A parameter or local of the pseudocode (N renames it, Y retypes it). */
+  | { kind: 'variable'; fnId: string; id: string; name: string; parameter: boolean; type: string | null };
+
+/** What Y sets the C type of: a parameter or local (its value subject), or a global by address. */
+export type TypeTarget = { fnId: string; valueId: string } | { addr: string };
 
 export type Dialog =
   | { kind: 'goto' }
@@ -50,6 +56,10 @@ export type Dialog =
   | { kind: 'renameVar'; fnId: string; valueId: string; current: string; parameter: boolean }
   /** `*`: an array of `type` at `addr`. */
   | { kind: 'array'; addr: string; type: string; current: number; max: number }
+  /** Y on a variable or global: its C type. */
+  | { kind: 'retype'; target: TypeTarget; what: string; current: string }
+  /** S on a pointer variable: a new structure from the members accessed through it. */
+  | { kind: 'createStruct'; fnId: string; valueId: string; variable: string; type: string }
   /** Alt+M: bookmark an address (current: its description when already bookmarked). */
   | { kind: 'bookmark'; addr: string; current: string | null }
   /** Ctrl+M: the bookmark list. */
@@ -707,10 +717,11 @@ export function beginRename(): void {
   else if (selection?.kind === 'addr') {
     fn = byEntry.get(selection.addr);
     if (!fn && !listing.data?.instructions.some((i) => i.addr === selection.addr)) {
-      // The label shown is the name an undo of this rename goes back to.
+      const name = selection.global?.name || selection.name || '';
+      // The name shown is the one an undo of this rename goes back to.
       const known = `${state.bid}|va:${selection.addr}`;
-      if (selection.name && !knownNames.has(known)) knownNames.set(known, selection.name);
-      setState({ dialog: { kind: 'rename', target: { addr: selection.addr }, current: selection.name ?? '', what: `global at ${selection.addr}` } });
+      if (name && !knownNames.has(known)) knownNames.set(known, name);
+      setState({ dialog: { kind: 'rename', target: { addr: selection.addr }, current: name, what: `global ${name ? `${name} ` : ''}at ${selection.addr}` } });
       return;
     }
   }
@@ -860,29 +871,38 @@ async function currentLibrary(): Promise<LibraryType[]> {
   return t.status === 'ready' && t.data ? t.data.library : (await api.types(state.bid!)).library;
 }
 
+/**
+ * Declares C types and returns the undo entry: it puts back the previous declaration of
+ * each redeclared name and removes the new names (their pointer helper types stay, as when
+ * a declaration is deleted).
+ */
+async function declareStep(source: string): Promise<UndoEntry & { declared: string[] }> {
+  const before = new Map((await currentLibrary()).flatMap((t) => (t.name ? [[t.name, t.declaration] as const] : [])));
+  let annotations = await applyDeclare(source);
+  const declared = Object.keys(annotations);
+  return {
+    declared,
+    label: `declaration of ${declared.join(', ') || 'types'}`,
+    undo: async () => {
+      const added = declared.filter((n) => !before.has(n)).map((n) => annotations[n]!);
+      const previous = declared.flatMap((n) => (before.has(n) ? [before.get(n)!] : []));
+      if (added.length) await applyRemoveTypes(added);
+      if (previous.length) await applyDeclare(previous.join('\n'));
+    },
+    redo: async () => {
+      annotations = await applyDeclare(source);
+    },
+  };
+}
+
 /** Declares C types in the image's type library. Resolves to the error text, or null on success. */
 export const declareTypes = tracked(async (source: string): Promise<string | null> => {
   const bid = state.bid;
   if (!bid) return 'No binary open';
   try {
-    const before = new Map((await currentLibrary()).flatMap((t) => (t.name ? [[t.name, t.declaration] as const] : [])));
-    let annotations = await applyDeclare(source);
-    const declared = Object.keys(annotations);
+    const { declared, ...entry } = await declareStep(source);
     toast(declared.length ? `Declared ${declared.join(', ')}` : 'Types declared');
-    // Undo puts back the previous declaration of each redeclared name and removes the new
-    // names (their pointer helper types stay, as when a declaration is deleted).
-    record(bid, {
-      label: `declaration of ${declared.join(', ') || 'types'}`,
-      undo: async () => {
-        const added = declared.filter((n) => !before.has(n)).map((n) => annotations[n]!);
-        const previous = declared.flatMap((n) => (before.has(n) ? [before.get(n)!] : []));
-        if (added.length) await applyRemoveTypes(added);
-        if (previous.length) await applyDeclare(previous.join('\n'));
-      },
-      redo: async () => {
-        annotations = await applyDeclare(source);
-      },
-    });
+    record(bid, entry);
     return null;
   } catch (e) {
     return errorText(e);
@@ -911,9 +931,22 @@ export const removeLibraryType = tracked(async (t: LibraryType): Promise<void> =
   }
 });
 
-/** The signature dialog (Y) for the selected call target, else the current function. */
+/**
+ * Y: the type dialog of the parameter, local or global selected in the pseudocode, else the
+ * signature dialog of the selected call target or the current function.
+ */
 export async function beginSignature(): Promise<void> {
   const { selection, byId, loc, bid } = state;
+  if (selection?.kind === 'variable') {
+    const what = `${selection.parameter ? 'parameter' : 'local'} ${selection.name}`;
+    setState({ dialog: { kind: 'retype', target: { fnId: selection.fnId, valueId: selection.id }, what, current: selection.type ?? '' } });
+    return;
+  }
+  if (selection?.kind === 'addr' && selection.global) {
+    const g = selection.global;
+    setState({ dialog: { kind: 'retype', target: { addr: selection.addr }, what: `global ${g.name || selection.addr}`, current: g.type } });
+    return;
+  }
   const fn = (selection?.kind === 'function' ? byId.get(selection.fnId) : undefined) ?? (loc?.fnId ? byId.get(loc.fnId) : undefined);
   if (!bid || !fn) return;
   try {
@@ -943,6 +976,113 @@ export const setSignature = tracked(async (fnId: string, text: string): Promise<
         'Signature stored, but OpenDecomp did not confirm it for this function, so its pseudocode keeps the inferred interface',
         'error',
       );
+    return null;
+  } catch (e) {
+    return errorText(e);
+  }
+});
+
+/** Types this tab gave variables and globals, for undo (as `knownNames`). */
+const knownTypes = new Map<string, string>();
+
+const typeKey = (bid: string, t: TypeTarget) => `${bid}|${'addr' in t ? `va:${t.addr}` : `value:${t.valueId}`}`;
+
+/** Applies a type; resolves to the type the variable's pseudocode now shows (null for a global or when unknown). */
+async function applyType(target: TypeTarget, text: string): Promise<string | null> {
+  const bid = state.bid!;
+  let shown: string | null = null;
+  if ('addr' in target) await api.setGlobalType(bid, target.addr, text);
+  else shown = (await api.setVariableType(bid, target.fnId, target.valueId, text, state.options)).shown;
+  knownTypes.set(typeKey(bid, target), text.trim());
+  await refreshAfterAnnotation();
+  return shown;
+}
+
+/**
+ * Whether the pseudocode honours a requested variable type: its declaration changed, and
+ * names every named type of the request (a contradicted type falls back to an integer).
+ */
+function honoured(requested: string, before: string | null, shown: string | null): boolean {
+  if (shown === null || !requested.trim()) return true;
+  const named = [...requested.matchAll(/\b(?:struct|union|enum)\s+([A-Za-z_]\w*)/g)].map((m) => m[1]!);
+  return (shown !== before || requested.replace(/\s+/g, '') === (before ?? '').replace(/\s+/g, '')) && named.every((n) => new RegExp(`\\b${n}\\b`).test(shown));
+}
+
+const notHonoured = (what: string, shown: string) =>
+  `Type stored, but OpenDecomp did not apply it here (its analysis contradicts it, or type recovery is partial, as on ELF images): the pseudocode declares ${what} as ${shown}. Reset in Y removes it`;
+
+/** The undo entry of a type change; the previous type is the one this tab set, else none (the inferred type). */
+function typeStep(bid: string, target: TypeTarget, text: string, label: string): UndoEntry {
+  const previous = knownTypes.get(typeKey(bid, target)) ?? '';
+  return {
+    label,
+    undo: async () => void (await applyType(target, previous)),
+    redo: async () => void (await applyType(target, text)),
+  };
+}
+
+/**
+ * Sets the C type of a parameter, local or global (Y); empty removes it, so OpenDecomp's
+ * inferred type is back. Resolves to the error text, or null.
+ */
+export const setType = tracked(async (target: TypeTarget, text: string, what: string, before: string | null = null): Promise<string | null> => {
+  const bid = state.bid;
+  if (!bid) return 'No binary open';
+  try {
+    const entry = typeStep(bid, target, text, `type of ${what}`);
+    const shown = await applyType(target, text);
+    record(bid, entry);
+    if (!honoured(text, before, shown)) toast(notHonoured(what, shown!), 'error');
+    else toast(text.trim() ? `${what} is now ${text.trim()}` : `Type of ${what} reset`);
+    return null;
+  } catch (e) {
+    return errorText(e);
+  }
+});
+
+/** S: create a structure from the selected pointer variable. */
+export function beginCreateStruct(): void {
+  const { selection } = state;
+  if (selection?.kind !== 'variable') {
+    toast('Select a pointer parameter or local in the pseudocode first (S creates a structure from it)', 'error');
+    return;
+  }
+  setState({ dialog: { kind: 'createStruct', fnId: selection.fnId, valueId: selection.id, variable: selection.name, type: selection.type ?? '' } });
+}
+
+/**
+ * Declares structure `name` with the members OpenDecomp recovered behind a pointer variable
+ * (Binary Ninja's "Create structure"), then retypes the variable as `struct name *`. One
+ * undo step reverts both. Resolves to the error text, or null.
+ */
+export const createStructFromVariable = tracked(async (fnId: string, valueId: string, variable: string, name: string): Promise<string | null> => {
+  const bid = state.bid;
+  if (!bid) return 'No binary open';
+  try {
+    const { declaration } = await api.structFromVariable(bid, fnId, variable, name.trim(), state.options);
+    const declare = await declareStep(declaration);
+    const target = { fnId, valueId };
+    const retype = typeStep(bid, target, `struct ${name.trim()} *`, '');
+    let shown: string | null;
+    try {
+      shown = await applyType(target, `struct ${name.trim()} *`);
+    } catch (e) {
+      await declare.undo();
+      throw e;
+    }
+    record(bid, {
+      label: `structure ${name.trim()} from ${variable}`,
+      undo: async () => {
+        await retype.undo();
+        await declare.undo();
+      },
+      redo: async () => {
+        await declare.redo();
+        await retype.redo();
+      },
+    });
+    if (!honoured(`struct ${name.trim()} *`, null, shown)) toast(`Declared struct ${name.trim()}. ${notHonoured(variable, shown!)}`, 'error');
+    else toast(`Declared struct ${name.trim()}; ${variable} is now struct ${name.trim()} *`);
     return null;
   } catch (e) {
     return errorText(e);
