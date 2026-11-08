@@ -192,8 +192,8 @@ export class Engine {
   }
 
   /** Rows of the whole-image listing around an address. */
-  async linear(bid: string, a: string, before: number, after: number) {
-    return (await this.#session(bid)).linear(addr(a), Number(before) || 0, Number(after) || 0);
+  async linear(bid: string, a: string, before: number, after: number, quick?: boolean) {
+    return (await this.#session(bid)).linear(addr(a), Number(before) || 0, Number(after) || 0, quick === true);
   }
 
   async dataAt(bid: string, a: string) {

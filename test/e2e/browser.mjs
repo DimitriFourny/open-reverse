@@ -180,7 +180,7 @@ let failures = 0;
   const toast = (text) => page.waitForSelector(`.toast:has-text(${JSON.stringify(text)})`, { timeout: 120000 });
   await step('undo / redo a rename and a comment (Ctrl+Z, Ctrl+Shift+Z, Ctrl+Y)', async () => {
     await page.locator('.side-item', { hasText: 'fixture_check' }).click();
-    await page.locator('.row.insn').first().click();
+    await page.locator('.row.insn.cur-fn').first().click();
     await page.keyboard.press('n');
     await page.fill('.modal-input', 'checker');
     await page.keyboard.press('Enter');
@@ -192,7 +192,7 @@ let failures = 0;
     await page.waitForSelector('.side-item.active:has-text("checker")', { timeout: 60000 });
     await page.keyboard.press('Control+z');
     await page.waitForSelector('.side-item.active:has-text("fixture_check")', { timeout: 60000 });
-    await page.locator('.row.insn').nth(3).click();
+    await page.locator('.row.insn.cur-fn').nth(3).click();
     await page.keyboard.press(';');
     await page.fill('.modal-input', 'short-lived');
     await page.keyboard.press('Enter');
@@ -206,7 +206,7 @@ let failures = 0;
     await page.waitForSelector('.user-comment:has-text("persisted comment")');
   });
   await step('xrefs from (Shift+X) and the To / From toggle', async () => {
-    await page.locator('.row.insn').first().click();
+    await page.locator('.row.insn.cur-fn').first().click();
     await page.keyboard.press('Shift+X');
     await page.waitForSelector('.panel-head:has-text("Xrefs from fixture_check")');
     await page.waitForSelector('.xref-table tbody tr:has-text("fixture_arithmetic")', { timeout: 60000 });
@@ -235,13 +235,13 @@ let failures = 0;
     await page.waitForSelector('.side-item.active:has-text("fixture_check")', { timeout: 60000 });
   });
   await step('bookmarks: Alt+M marks, Ctrl+M lists, jumps and removes', async () => {
-    await page.locator('.row.insn').nth(4).click();
+    await page.locator('.row.insn.cur-fn').nth(4).click();
     const at = await page.locator('.row.cursor .addr').first().textContent();
     await page.keyboard.press('Alt+m');
     await page.fill('.modal-input', 'check loop');
     await page.keyboard.press('Enter');
     await toast('Bookmarked');
-    await page.locator('.row.insn').nth(8).click();
+    await page.locator('.row.insn.cur-fn').nth(8).click();
     await page.keyboard.press('Alt+m');
     await page.keyboard.press('Enter');
     await page.locator('.side-item', { hasText: 'fixture_arithmetic' }).click();
@@ -299,11 +299,24 @@ let failures = 0;
     await waitCursor(/dw0x0, 0x0, 0x0, 0x0 ; u16\[4\]/, 'array');
     await page.keyboard.press('u');
     await waitCursor(/0x200 dup\(\?\)/, 'U');
-    // N on data renames the global; X lists its references.
+    // Undo / redo put back the definition (listing and OpenDecomp type).
+    await page.keyboard.press('Control+z');
+    await waitCursor(/dw0x0, 0x0, 0x0, 0x0 ; u16\[4\]/, 'undo of U');
+    await page.keyboard.press('Control+z');
+    await waitCursor(/dw0x0$/, 'undo of *');
+    await page.keyboard.press('Control+Shift+z');
+    await waitCursor(/u16\[4\]/, 'redo of *');
+    await page.keyboard.press('Control+Shift+z');
+    await waitCursor(/0x200 dup\(\?\)/, 'redo of U');
+    // N on data renames the global; X lists its references; undo restores the label.
     await page.keyboard.press('n');
     await page.waitForSelector('.modal-title:has-text("Rename global at 0x100008008")');
     await page.fill('.modal-input', 'zero_buffer');
     await page.keyboard.press('Enter');
+    await page.waitForSelector('.label-data:text-is("zero_buffer:")', { timeout: 60000 });
+    await page.keyboard.press('Control+z');
+    await page.waitForSelector('.label-data:text-is("_fixture_zero_fill:")', { timeout: 60000 });
+    await page.keyboard.press('Control+Shift+z');
     await page.waitForSelector('.label-data:text-is("zero_buffer:")', { timeout: 60000 });
     await goTo('_fixture_message');
     await waitCursor(/fixture v1/, 'back to the string');
@@ -349,7 +362,7 @@ let failures = 0;
     await page.waitForSelector('.pline:has-text("return total;")', { timeout: 120000 });
   });
   await step('undo a local rename, a signature and a type redeclaration', async () => {
-    await page.locator('.row.insn').first().click();
+    await page.locator('.row.insn.cur-fn').first().click();
     await page.keyboard.press('Control+z');
     await page.waitForSelector('.pline:has-text("return accumulator;")', { timeout: 120000 });
     await page.keyboard.press('Control+z');

@@ -296,7 +296,9 @@ export const api = {
   functionAt: (bid: string, addr: string) => call<{ function: FunctionSummary | null }>('functionAt', [bid, addr]),
   listing: (bid: string, fid: string) => call<Listing>('listing', [bid, fid]),
   /** Rows of the whole-image listing: up to `before` rows before `addr` and `after` from it. */
-  linear: (bid: string, addr: string, before: number, after: number) => call<LinearWindow>('linear', [bid, addr, before, after]),
+  /** `quick`: stop at neighbouring functions not listed yet (a first paint; extensions fetch the rest). */
+  linear: (bid: string, addr: string, before: number, after: number, quick = false) =>
+    call<LinearWindow>('linear', [bid, addr, before, after, quick]),
   dataAt: (bid: string, addr: string) => call<{ start: string; def: DataDef | null; type: DataType; maxCount: number }>('dataAt', [bid, addr]),
   defineData: (bid: string, addr: string, action: DataAction, count?: number) =>
     call<{

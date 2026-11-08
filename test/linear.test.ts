@@ -45,6 +45,7 @@ const layout = buildLayout(sections, items, new Map([['0x2050', 'table'], ['0x20
 const lin = new LinearListing(layout, {
   read: async (start, len) => memory.slice(Number(start), Number(start) + len),
   listing: async () => listing,
+  listed: () => true,
   refAt: (a) => (a === 0x1010n ? { addr: '0x1010', kind: 'function', label: 'main' } : null),
 });
 
@@ -118,6 +119,21 @@ describe('linear listing', () => {
     assert.equal((await lin.window(0x1000n, 10, 1)).atStart, true);
     assert.equal((await lin.window(0x20c0n, 1, 10)).atEnd, true);
     assert.equal((await lin.window(0x1018n, 1, 1)).atEnd, false);
+  });
+
+  test('a quick window stops at a function whose listing is not at hand', async () => {
+    const cold = new LinearListing(layout, {
+      read: async (start, len) => memory.slice(Number(start), Number(start) + len),
+      listing: async () => listing,
+      listed: () => false,
+      refAt: () => null,
+    });
+    // From the data: the window ends before the function, without claiming the end of the image.
+    const w = await cold.window(0x1000n, 0, 100, true);
+    assert.deepEqual(w.rows.map(show), ['0x1000 blank', '0x1000 section:.text', '0x1000 db cc cc cc cc cc cc cc cc cc cc cc cc cc cc cc cc']);
+    assert.equal(w.atEnd, false);
+    // The unit holding the address is always built.
+    assert.ok((await cold.window(0x1014n, 5, 5, true)).rows.some((r) => r.kind === 'insn'));
   });
 
   test('quotes C strings', () => {

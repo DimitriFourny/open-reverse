@@ -17,8 +17,12 @@ type DataRow = Extract<LinearRow, { kind: 'data' }>;
 const ROW_H = 20;
 const LANE_W = 6;
 const MAX_LANES = 14;
-/** Rows fetched around a navigation target, and per extension at an edge. */
-const AROUND = { before: 120, after: 280 };
+/**
+ * Rows fetched around a navigation target: about a screen, usually just the cursor's function,
+ * so it shows as soon as that function's data exists; the rest of the slice fills in by
+ * extensions at the edges. Then rows per extension.
+ */
+const AROUND = { before: 40, after: 80 };
 const EXTEND = 400;
 /** Extend when the viewport is this many rows from an edge of the slice. */
 const EDGE = 150;
@@ -209,7 +213,7 @@ export function LinearView() {
   const reload = async (addr: string, align: 'top' | 'center' | 'keep', offset = 0) => {
     const g = ++gen.current;
     try {
-      const w = await api.linear(bid, addr, AROUND.before, AROUND.after);
+      const w = await api.linear(bid, addr, AROUND.before, AROUND.after, true);
       if (g !== gen.current) return;
       pending.current = { addr, align, offset };
       shift.current = 0;
@@ -234,6 +238,7 @@ export function LinearView() {
     if (!dir) return;
     extending.current = true;
     const g = gen.current;
+    let retry = 0;
     try {
       const anchor = dir === 'before' ? w.rows[0]!.addr : hex(BigInt(w.rows.at(-1)!.addr) + 1n);
       const r = await api.linear(bid, anchor, dir === 'before' ? EXTEND : 0, dir === 'after' ? EXTEND : 0);
@@ -263,10 +268,14 @@ export function LinearView() {
         next = { rows: all, atStart, atEnd: r.atEnd || (r.rows.length === 0) };
       }
       setWin(next);
+      retry = 0;
     } catch {
-      // Retried on the next scroll.
+      retry = 1000;
     } finally {
       extending.current = false;
+      // Again: a reload may have replaced the slice meanwhile (this result was then dropped),
+      // and a slice shorter than the viewport gets no scroll event to ask.
+      setTimeout(() => void checkEdges(), retry);
     }
   };
 

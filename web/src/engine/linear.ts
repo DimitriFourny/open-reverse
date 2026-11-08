@@ -126,6 +126,8 @@ export interface Sources {
   /** `len` bytes at `start` (zero where nothing is mapped). */
   read(start: bigint, len: number): Promise<Uint8Array>;
   listing(fnId: string): Promise<FunctionListing>;
+  /** Whether a function's listing is at hand (no OpenDecomp request needed). */
+  listed(fnId: string): boolean;
   /** What an address points to, for pointer operands. */
   refAt(addr: bigint): DataRef | null;
 }
@@ -429,9 +431,12 @@ export class LinearListing {
 
   /**
    * Rows around `addr`: up to `before` rows before the first row of `addr` and up to
-   * `after` rows from it, never splitting the rows of one address.
+   * `after` rows from it, never splitting the rows of one address. `quick`: besides the unit
+   * holding `addr`, stop at the first function whose listing is not at hand (the window then
+   * just ends there, and extending it fetches the rest).
    */
-  async window(addr: bigint, before: number, after: number): Promise<LinearWindow> {
+  async window(addr: bigint, before: number, after: number, quick = false): Promise<LinearWindow> {
+    const pending = (u: Unit) => quick && u.item?.kind === 'code' && !this.#src.listed(u.item.fnId);
     before = Math.max(0, Math.min(MAX_WINDOW_ROWS, before));
     after = Math.max(0, Math.min(MAX_WINDOW_ROWS, after));
     const first = await this.unitAt(addr);
@@ -452,6 +457,7 @@ export class LinearListing {
           atEnd = true;
           break;
         }
+        if (pending(u)) break;
         tail = tail.concat(await this.rows(u));
       }
       if (tail.length > after) {
@@ -468,6 +474,7 @@ export class LinearListing {
           atStart = true;
           break;
         }
+        if (pending(u)) break;
         head = (await this.rows(u)).concat(head);
       }
       if (head.length > before) {

@@ -265,12 +265,14 @@ export class AnalysisSession {
   #strings: Promise<Map<string, { text: string; encoding: string; id: string; length: number; terminated: boolean }>> | null = null;
   #relocations: Promise<{ addr: bigint; width: number; target: bigint | null; symbol: string | null }[]> | null = null;
   /** Function listings (without comments) at one revision. */
-  #listings: { revision: number; map: Map<string, Promise<ListingCore>> } | null = null;
+  #listings: { revision: number; map: Map<string, Promise<ListingCore>>; ready: Set<string> } | null = null;
   /** 4 KiB pages of image memory (zero where unmapped). The image never changes. */
   readonly #pages = new Map<bigint, Promise<Uint8Array>>();
   /** Bumped when data definitions or listing names change outside the revision. */
   #dataVersion = 0;
   #linear: { key: string; value: Promise<LinearListing> } | null = null;
+  /** The image's sections never change. */
+  #sectionsOnce: Promise<LayoutSection[]> | null = null;
   #mappings: Promise<Mapping[]> | null = null;
   /** Names for reference targets at one revision: imports by entity id and by slot, symbols by address. */
   #names: { revision: number; value: Promise<Names> } | null = null;
@@ -657,8 +659,8 @@ export class AnalysisSession {
    */
   #cachedListing(functionId: string, withCfg = true): Promise<ListingCore> {
     const revision = this.binary.revision;
-    if (this.#listings?.revision !== revision) this.#listings = { revision, map: new Map() };
-    const map = this.#listings.map;
+    if (this.#listings?.revision !== revision) this.#listings = { revision, map: new Map(), ready: new Set() };
+    const { map, ready } = this.#listings;
     const key = withCfg ? functionId : `lite:${functionId}`;
     let p = map.get(functionId) ?? map.get(key);
     if (p) {
@@ -668,6 +670,7 @@ export class AnalysisSession {
     }
     p = this.#buildListing(functionId, withCfg);
     map.set(key, p);
+    p.then(() => ready.add(functionId), () => undefined);
     p.catch(() => map.get(key) === p && map.delete(key));
     while (map.size > 512) map.delete(map.keys().next().value!);
     return p;
@@ -717,6 +720,8 @@ export class AnalysisSession {
       withCfg || !fn.importStub ? this.#outgoing(functionId).catch(() => new Map<string, never[]>()) : new Map<string, never[]>(),
       this.#loadNames().catch((): Names => ({ byEntity: new Map(), byAddr: new Map(), symbols: new Map(), slots: new Map() })),
     ]);
+    // Globals renamed here: their name is an annotation on the data entity, not on the symbol.
+    const globals = (await this.#workspace.data(this.record.id)).names;
     const bytes = await this.#instructionBytes(raw.map((i) => ({ addr: BigInt(i.address.value), size: i.size })));
 
     const idToAddr = new Map<string, string>();
@@ -735,7 +740,7 @@ export class AnalysisSession {
         else if (targets.includes(a)) refs.push({ text: c.text, addr: a, kind: 'code', label: '' });
         // A memory operand naming a mapped address, or an immediate that looks like a pointer.
         else if ((c.inMemory || c.value >= 0x10000n) && (await this.#isMapped(c.value)))
-          refs.push({ text: c.text, addr: a, kind: 'data', label: '' });
+          refs.push({ text: c.text, addr: a, kind: 'data', label: globals[a] ?? names.symbols.get(a) ?? '' });
       }
       const resolved: Instruction['resolved'] = [];
       for (const r of outgoing.get(addr) ?? []) {
@@ -745,7 +750,7 @@ export class AnalysisSession {
         if (!to && r.kind === 'branch') continue;
         const f = (to ? index.byEntry.get(to) : undefined) ?? (r.to_entity ? index.byId.get(r.to_entity) : undefined);
         const s = to ? strings.get(to) : undefined;
-        const name = (r.to_entity ? names.byEntity.get(r.to_entity) : undefined) ?? (to ? names.byAddr.get(to) : undefined);
+        const name = (to ? globals[to] : undefined) ?? (r.to_entity ? names.byEntity.get(r.to_entity) : undefined) ?? (to ? names.byAddr.get(to) : undefined);
         const item: Instruction['resolved'][number] | null = f
           ? { addr: f.entry, kind: 'function', label: f.name, access: r.kind }
           : s && to
@@ -840,7 +845,13 @@ export class AnalysisSession {
   }
 
   /** The image's mapped sections (its segments when it has no sections), for the listing. */
-  async #layoutSections(): Promise<LayoutSection[]> {
+  #layoutSections(): Promise<LayoutSection[]> {
+    this.#sectionsOnce ??= this.#readLayoutSections();
+    this.#sectionsOnce.catch(() => (this.#sectionsOnce = null));
+    return this.#sectionsOnce;
+  }
+
+  async #readLayoutSections(): Promise<LayoutSection[]> {
     const all = (await this.sections()).filter((s) => s.start && s.size > 0 && s.permissions.length > 0);
     const sections = all.filter((s) => s.kind === 'section');
     return (sections.length ? sections : all).map((s) => {
@@ -909,6 +920,7 @@ export class AnalysisSession {
       return new LinearListing(layout, {
         read: (start, len) => this.#read(start, len),
         listing: (fnId) => this.#cachedListing(fnId, false),
+        listed: (fnId) => this.#listings?.revision === this.binary.revision && this.#listings.ready.has(fnId),
         refAt,
       });
     })();
@@ -925,13 +937,13 @@ export class AnalysisSession {
    * the new revision starts.
    */
   async #warm(addr: string): Promise<void> {
-    await this.linear(addr, 120, 280).catch(() => undefined);
+    await this.linear(addr, 40, 80).catch(() => undefined);
   }
 
   /** Rows of the whole-image listing around an address (see linear.ts). */
-  async linear(addr: string, before: number, after: number) {
+  async linear(addr: string, before: number, after: number, quick = false) {
     const listing = await this.#linearListing();
-    return listing.window(BigInt(addr), before, after);
+    return listing.window(BigInt(addr), before, after, quick);
   }
 
   // ------------------------------------------------------- data definitions
