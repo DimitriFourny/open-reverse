@@ -98,9 +98,9 @@ export function Sidebar() {
           primary: s.text,
           secondary: padAddr(s.addr),
           addr: s.addr,
-          title: `${s.addr} (${s.encoding}) — click: xrefs · double-click: hex`,
+          title: `${s.addr} (${s.encoding}) — click: xrefs · right-click: go to`,
           onOpen: () => void showXrefs({ addr: s.addr }, JSON.stringify(s.text.slice(0, 40))),
-          onXrefs: () => void navigate(s.addr, { view: 'hex' }),
+          onXrefs: () => void navigate(s.addr),
         }));
     if (tab === 'symbols')
       return (symbols.data ?? [])
@@ -125,7 +125,7 @@ export function Sidebar() {
         cls: s.kind === 'segment' ? 'segment' : '',
         title: `${s.kind} ${s.name}: ${s.start ?? 'unmapped'} size 0x${s.size.toString(16)} · file ${s.fileOffset ?? '-'} size 0x${s.fileSize.toString(16)} · ${s.permissions.join(', ') || 'no permissions'}`,
         onOpen: () => {
-          if (s.start && s.size > 0) void navigate(s.start, { view: 'hex' });
+          if (s.start && s.size > 0) void navigate(s.start);
         },
       }));
   }, [tab, functions, strings.data, symbols.data, sections.data, f, sort]);
@@ -167,7 +167,7 @@ export function Sidebar() {
         {items.length.toLocaleString()} {tab}
         {tab === 'functions' && indexState !== 'complete' && (discovery?.state === 'running' ? ' · discovering…' : ' · partial index')}
         {tab === 'functions' && ' · right-click: xrefs'}
-        {tab === 'strings' && ' · click: xrefs · right-click: hex'}
+        {tab === 'strings' && ' · click: xrefs · right-click: go to'}
       </div>
       {state && state.status === 'loading' && <div className="placeholder">Loading…</div>}
       {state && state.status === 'error' && <div className="placeholder error">{state.error}</div>}

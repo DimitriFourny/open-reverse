@@ -6,9 +6,13 @@
 //                         generator, createdAt, record: BinaryRecord }
 //   binary/<record.name>  the binary itself (its SHA-256 must equal record.sha256)
 //   comments.json         { "<0xaddr>": "text" } user comments
-//   bookmarks.json        { "<0xaddr>": "description" } bookmarks (version 2; written
-//                         only when there are bookmarks, and an archive without them
-//                         says version 1 so older readers still open it)
+//   bookmarks.json        (version 2) { "<0xaddr>": "description" } bookmarks
+//   data.json             (version 2) { "defs": { "<0xaddr>": { "type", "count", "od"? } },
+//                         "names": { "<0xaddr>": "name" } }: data definitions and listing
+//                         names
+//
+// Both version 2 entries are optional and written only when there is something to
+// write; an archive with neither says version 1, so older readers still open it.
 //   project/<path>        the OpenDecomp project directory (cache root) as stored
 //                         under /workspace/binaries/<id>/project/: project.sqlite
 //                         (analysis cache, annotations such as renames), images/,
@@ -18,7 +22,8 @@
 // only, no duplicate, absolute, `..`, backslash or control-character paths,
 // size limits, the binary hash, the record and the comments.
 
-import { sanitizeFileName, sha256Hex } from './workspace.ts';
+import { DATA_TYPES } from './linear.ts';
+import { emptyData, isEmptyData, sanitizeFileName, sha256Hex, type WorkspaceData } from './workspace.ts';
 
 export { sha256Hex };
 import { DEFAULT_ZIP_LIMITS, ZipError, zipDecode, zipEncode, type ZipEntry, type ZipLimits } from './zip.ts';
@@ -43,6 +48,8 @@ export interface ProjectArchive {
   comments: Record<string, string>;
   /** Bookmarked addresses and their descriptions (empty when the archive has none). */
   bookmarks?: Record<string, string>;
+  /** Data definitions and listing names (empty when the archive has none). */
+  data?: WorkspaceData;
   /** Files of the OpenDecomp project directory, keyed by path relative to it. */
   project: Map<string, Uint8Array>;
 }
@@ -101,10 +108,12 @@ export async function encodeProjectArchive(
   const createdAt = opts.createdAt ?? new Date();
   const bookmarks = archive.bookmarks ?? {};
   const hasBookmarks = Object.keys(bookmarks).length > 0;
+  const data = archive.data ?? emptyData();
+  const hasData = !isEmptyData(data);
   const manifest: ArchiveManifest = {
     format: ARCHIVE_FORMAT,
     // The oldest version that holds everything: version 1 readers reject unknown entries.
-    version: hasBookmarks ? 2 : 1,
+    version: hasBookmarks || hasData ? 2 : 1,
     generator: 'OpenReverse',
     createdAt: createdAt.toISOString(),
     record: archive.record,
@@ -115,6 +124,7 @@ export async function encodeProjectArchive(
     { path: 'comments.json', data: enc.encode(JSON.stringify(archive.comments)) },
     ...(hasBookmarks ? [{ path: 'bookmarks.json', data: enc.encode(JSON.stringify(bookmarks)) }] : []),
   ];
+  if (hasData) entries.push({ path: 'data.json', data: enc.encode(JSON.stringify(data)) });
   for (const [rel, data] of [...archive.project].sort((a, b) => (a[0] < b[0] ? -1 : 1))) {
     const safe = safeRelativePath(rel);
     if (safe === null) throw new ArchiveError(`Unsafe project path ${JSON.stringify(rel)}`);
@@ -160,6 +170,39 @@ function validateAddressTexts(value: unknown, what: 'comment' | 'bookmark'): Rec
   return out;
 }
 
+const ADDR_RE = /^0x[0-9a-f]{1,16}$/;
+
+function validateData(value: unknown): WorkspaceData {
+  const v = value as Partial<Record<keyof WorkspaceData, unknown>> | null;
+  if (!v || typeof v !== 'object' || Array.isArray(v)) throw new ArchiveError('data.json must be an object');
+  const out = emptyData();
+  const defs = v.defs ?? {};
+  const names = v.names ?? {};
+  if (typeof defs !== 'object' || Array.isArray(defs) || typeof names !== 'object' || Array.isArray(names)) throw new ArchiveError('Invalid data.json');
+  if (Object.keys(defs).length + Object.keys(names).length > MAX_COMMENTS) throw new ArchiveError('Too many data definitions');
+  for (const [k, d] of Object.entries(defs as Record<string, unknown>)) {
+    const def = d as { type?: unknown; count?: unknown; od?: unknown } | null;
+    if (
+      !ADDR_RE.test(k) ||
+      !def ||
+      !DATA_TYPES.includes(def.type as never) ||
+      typeof def.count !== 'number' ||
+      !Number.isSafeInteger(def.count) ||
+      def.count < 1 ||
+      def.count > 1 << 24 ||
+      (def.od !== undefined && typeof def.od !== 'boolean')
+    )
+      throw new ArchiveError(`Invalid data definition at ${JSON.stringify(k.slice(0, 40))}`);
+    out.defs[k] = { type: def.type as WorkspaceData['defs'][string]['type'], count: def.count, ...(def.od ? { od: true } : {}) };
+  }
+  for (const [k, n] of Object.entries(names as Record<string, unknown>)) {
+    if (!ADDR_RE.test(k) || typeof n !== 'string' || !/^[A-Za-z_][A-Za-z0-9_:$.@]{0,1023}$/.test(n))
+      throw new ArchiveError(`Invalid name at ${JSON.stringify(k.slice(0, 40))}`);
+    out.names[k] = n;
+  }
+  return out;
+}
+
 const SQLITE_MAGIC = enc.encode('SQLite format 3\0');
 
 /** Decodes and validates an archive. Throws ArchiveError describing the first problem. */
@@ -184,19 +227,21 @@ export async function decodeProjectArchive(bytes: Uint8Array, limits: ArchiveLim
   if (typeof manifest.version !== 'number' || !Number.isInteger(manifest.version) || manifest.version < 1)
     throw new ArchiveError('Invalid archive version');
   if (manifest.version > ARCHIVE_VERSION)
-    throw new ArchiveError(`This archive has format version ${manifest.version}; this OpenReverse reads version ${ARCHIVE_VERSION}. Update OpenReverse.`);
+    throw new ArchiveError(`This archive has format version ${manifest.version}; this OpenReverse reads versions 1 to ${ARCHIVE_VERSION}. Update OpenReverse.`);
   const record = validateRecord(manifest.record);
 
   const binaryPath = `binary/${record.name}`;
   let binary: Uint8Array | null = null;
   let comments: Record<string, string> = {};
   let bookmarks: Record<string, string> = {};
+  let workspaceData = emptyData();
   const project = new Map<string, Uint8Array>();
   for (const [path, data] of byPath) {
     if (path === ARCHIVE_MANIFEST) continue;
     if (path === binaryPath) binary = data;
     else if (path === 'comments.json') comments = validateAddressTexts(parseJson(data, 'comments.json'), 'comment');
-    else if (path === 'bookmarks.json') bookmarks = validateAddressTexts(parseJson(data, 'bookmarks.json'), 'bookmark');
+    else if (path === 'bookmarks.json' && manifest.version >= 2) bookmarks = validateAddressTexts(parseJson(data, 'bookmarks.json'), 'bookmark');
+    else if (path === 'data.json' && manifest.version >= 2) workspaceData = validateData(parseJson(data, 'data.json'));
     else if (path === 'project/' || path === 'binary/') continue;
     else if (path.startsWith('project/')) {
       const isDir = path.endsWith('/');
@@ -217,5 +262,5 @@ export async function decodeProjectArchive(bytes: Uint8Array, limits: ArchiveLim
   if (!binary) throw new ArchiveError(`The archive has no binary (${binaryPath})`);
   if (binary.byteLength !== record.size) throw new ArchiveError('The binary size does not match the manifest');
   if ((await sha256Hex(binary)) !== record.sha256) throw new ArchiveError('The binary does not match its sha256 (corrupt archive)');
-  return { record, binary, comments, bookmarks, project };
+  return { record, binary, comments, bookmarks, data: workspaceData, project };
 }

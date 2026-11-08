@@ -36,7 +36,8 @@ export async function snapshotProject(workspace: Workspace, record: BinaryRecord
     if (node.kind === 'file' && path.startsWith(`${root}/`)) project.set(path.slice(root.length + 1), vfs.snapshot(path));
   const comments = await workspace.comments(record.id);
   const bookmarks = await workspace.bookmarks(record.id);
-  return { record, binary, comments, bookmarks, project };
+  const data = await workspace.data(record.id);
+  return { record, binary, comments, bookmarks, data, project };
 }
 
 // ---------------------------------------------------------------- pseudocode

@@ -8,6 +8,23 @@ import { encodeTypeDefinition } from '@od/core/serialization.js';
 import { parseCDeclarations } from '@od/metadata/c-declarations/index.js';
 import { demangleName } from '@od/metadata/symbols/index.js';
 import { canon, operandConstants } from './hex.ts';
+import {
+  buildLayout,
+  cStringLength,
+  DATA_TYPES,
+  defSize,
+  elementSize,
+  itemAt,
+  LinearListing,
+  quoteC,
+  sectionIndex,
+  type DataDef,
+  type DataRef,
+  type DataType,
+  type Instruction,
+  type LayoutItem,
+  type LayoutSection,
+} from './linear.ts';
 import { compilePrototype, compileType, PrototypeError, type TypeDefinition, type TypeIds } from './prototype.ts';
 import { declaredMembers, normalizeType, recoveredDeclaration, structLayout } from './structs.ts';
 import { createHash } from './shims/crypto.ts';
@@ -73,25 +90,20 @@ export interface FunctionSummary {
   importStub: boolean;
 }
 
-export interface Instruction {
-  addr: string;
-  size: number;
-  bytes: string;
-  mnemonic: string;
-  operands: string;
-  valid: boolean;
-  flow: { kind: string; targets: string[]; conditional: boolean };
-  refs: { text: string; addr: string; kind: 'function' | 'string' | 'code' | 'data'; label: string }[];
-  /** Addresses OpenDecomp computed for this instruction beyond its operand text (ARM64 ADRP+ADD/LDR,
-   * x86 RIP-relative loads, GOT/import slots...), with what they name. */
-  resolved: { addr: string; kind: 'function' | 'string' | 'import' | 'data' | 'code'; label: string; access: string }[];
-}
+export type { Instruction };
 
 export interface Block {
   id: string;
   start: string;
   insns: string[];
   edges: { to: string | null; target: string | null; kind: string; conditional: boolean }[];
+}
+
+interface ListingCore {
+  function: FunctionSummary;
+  instructions: Instruction[];
+  blocks: Block[];
+  gaps: unknown[];
 }
 
 interface Mapping {
@@ -173,6 +185,21 @@ function errorMessages(result: unknown): string {
 }
 
 const AUTHOR = 'open-reverse';
+const NAME_RE = /^[A-Za-z_][A-Za-z0-9_:$.@]*$/;
+const NAME_ERROR = 'Names must be identifiers (letters, digits, _ : $ . @)';
+
+/** Reference target names: imports by entity id and by slot, symbols by address. */
+interface Names {
+  byEntity: Map<string, string>;
+  byAddr: Map<string, string>;
+  /** Symbols (not imports) by address. */
+  symbols: Map<string, string>;
+  /** Import slots by address. */
+  slots: Map<string, string>;
+}
+
+/** What D, A, O, * and U do at an address. */
+export type DataAction = 'cycle' | 'string' | 'ptr' | 'array' | 'undefine';
 
 type Definition = Parameters<typeof encodeTypeDefinition>[0];
 type DecompileOptions = { language: 'c-like' | 'python-like'; inference: 'proven' | 'likely'; view: 'source' | 'checked' };
@@ -268,12 +295,31 @@ export class AnalysisSession {
   readonly gate = new Gate();
   readonly #workspace: Workspace;
   readonly #writes = new Mutex();
+  readonly #dataOps = new Mutex();
   discovery: DiscoveryStatus = { state: 'idle', message: null };
-  #functions: { revision: number; list: FunctionSummary[]; byId: Map<string, FunctionSummary>; byEntry: Map<string, FunctionSummary>; indexState: string } | null = null;
-  #strings: Promise<Map<string, { text: string; encoding: string; id: string }>> | null = null;
+  #functions: {
+    revision: number;
+    list: FunctionSummary[];
+    byId: Map<string, FunctionSummary>;
+    byEntry: Map<string, FunctionSummary>;
+    /** Address ranges of each function, [start, end). */
+    ranges: Map<string, [bigint, bigint][]>;
+    indexState: string;
+  } | null = null;
+  #strings: Promise<Map<string, { text: string; encoding: string; id: string; length: number; terminated: boolean }>> | null = null;
+  #relocations: Promise<{ addr: bigint; width: number; target: bigint | null; symbol: string | null }[]> | null = null;
+  /** Function listings (without comments) at one revision. */
+  #listings: { revision: number; map: Map<string, Promise<ListingCore>>; ready: Set<string> } | null = null;
+  /** 4 KiB pages of image memory (zero where unmapped). The image never changes. */
+  readonly #pages = new Map<bigint, Promise<Uint8Array>>();
+  /** Bumped when data definitions or listing names change outside the revision. */
+  #dataVersion = 0;
+  #linear: { key: string; value: Promise<LinearListing> } | null = null;
+  /** The image's sections never change. */
+  #sectionsOnce: Promise<LayoutSection[]> | null = null;
   #mappings: Promise<Mapping[]> | null = null;
   /** Names for reference targets at one revision: imports by entity id and by slot, symbols by address. */
-  #names: { revision: number; value: Promise<{ byEntity: Map<string, string>; byAddr: Map<string, string> }> } | null = null;
+  #names: { revision: number; value: Promise<Names> } | null = null;
   /** Type library IDs by C name (and `Name*` for its pointer type), including typedef aliases. */
   readonly #typeNames = new Map<string, string>();
 
@@ -344,6 +390,7 @@ export class AnalysisSession {
     const revision = this.binary.revision;
     if (this.#functions?.revision === revision) return this.#functions;
     const list: FunctionSummary[] = [];
+    const ranges = new Map<string, [bigint, bigint][]>();
     let cursor: string | undefined;
     let indexState = 'complete';
     do {
@@ -355,6 +402,10 @@ export class AnalysisSession {
         const size = fn.ranges.reduce((n, r) => n + Number(BigInt(r.size)), 0);
         // OpenDecomp shows a mangled name demangled: that is not a rename.
         const demangled = fn.original_name ? await this.#demangled(fn.original_name) : null;
+        ranges.set(
+          fn.id,
+          fn.ranges.map((r) => [BigInt(r.start.value), BigInt(r.start.value) + BigInt(r.size)]),
+        );
         list.push({
           id: fn.id,
           name: fn.display_name ?? demangled ?? fn.original_name ?? `sub_${entry.slice(2)}`,
@@ -376,6 +427,7 @@ export class AnalysisSession {
       list,
       byId: new Map(list.map((f) => [f.id, f])),
       byEntry: new Map(list.map((f) => [f.entry, f])),
+      ranges,
       indexState,
     };
     this.#functions = index;
@@ -452,22 +504,30 @@ export class AnalysisSession {
       id: string;
       name: string;
       kind: string;
-      virtual_range: { start: { value: string }; size: string } | null;
+      virtual_range: { start: { space: string; value: string }; size: string } | null;
       file_range: { start: { value: string }; size: string } | null;
       permissions: string[];
+      flags?: string;
     };
     const items = (await this.#binaryInfoList('sections')) as Section[];
+    const macho = this.binary.image.target.format === 'macho';
     return items
-      .map((s) => ({
-        id: s.id,
-        name: s.name,
-        kind: s.kind,
-        start: s.virtual_range ? canon(s.virtual_range.start.value) : null,
-        size: s.virtual_range ? Number(BigInt(s.virtual_range.size)) : 0,
-        fileOffset: s.file_range ? canon(s.file_range.start.value) : null,
-        fileSize: s.file_range ? Number(BigInt(s.file_range.size)) : 0,
-        permissions: s.permissions,
-      }))
+      .map((s) => {
+        // A section that is not loaded (ELF .shstrtab, .symtab...) has a file-space range: no address.
+        const va = s.virtual_range?.start.space === 'va' ? s.virtual_range : null;
+        return {
+          id: s.id,
+          name: s.name,
+          kind: s.kind,
+          start: va ? canon(va.start.value) : null,
+          size: va ? Number(BigInt(va.size)) : 0,
+          fileOffset: s.file_range ? canon(s.file_range.start.value) : null,
+          fileSize: s.file_range ? Number(BigInt(s.file_range.size)) : 0,
+          permissions: s.permissions,
+          // Mach-O sections carry their segment's permissions: __TEXT,__const is not code.
+          exec: macho && s.kind === 'section' ? (Number(s.flags ?? 0) & 0x80000400) !== 0 : s.permissions.includes('execute'),
+        };
+      })
       .sort((a, b) => (a.start && b.start ? (BigInt(a.start) < BigInt(b.start) ? -1 : 1) : 0));
   }
 
@@ -503,13 +563,20 @@ export class AnalysisSession {
 
   #loadStrings() {
     this.#strings ??= (async () => {
-      const map = new Map<string, { text: string; encoding: string; id: string }>();
+      const map = new Map<string, { text: string; encoding: string; id: string; length: number; terminated: boolean }>();
       let cursor: string | undefined;
       do {
         const data = need(
           await this.binary.findStrings({ page: { limit: 1000, ...(cursor ? { cursor } : {}) } }),
         );
-        for (const s of data.items) map.set(canon(s.address.value), { text: s.text, encoding: s.encoding, id: s.id });
+        for (const s of data.items)
+          map.set(canon(s.address.value), {
+            text: s.text,
+            encoding: s.encoding,
+            id: s.id,
+            length: Number(BigInt(s.byte_length)),
+            terminated: s.terminated,
+          });
         cursor = data.page.next_cursor ?? undefined;
       } while (cursor && map.size < MAX_LIST_ITEMS);
       return map;
@@ -524,6 +591,8 @@ export class AnalysisSession {
       type Named = { id: string; display_name: string | null; original_name: string | null; address?: { value: string } | null; slot?: { value: string } | null };
       const byEntity = new Map<string, string>();
       const byAddr = new Map<string, string>();
+      const symbols = new Map<string, string>();
+      const slots = new Map<string, string>();
       let cursor: string | undefined;
       do {
         const data = need(await this.binary.findSymbols({ page: { limit: 1000, ...(cursor ? { cursor } : {}) } }));
@@ -534,10 +603,12 @@ export class AnalysisSession {
           byEntity.set(e.id, name);
           const at = item.import ? e.slot?.value : e.address?.value;
           if (at && !byAddr.has(canon(at))) byAddr.set(canon(at), name);
+          const own = at ? (item.import ? slots : symbols) : null;
+          if (at && own && !own.has(canon(at))) own.set(canon(at), name);
         }
         cursor = data.page.next_cursor ?? undefined;
       } while (cursor && byEntity.size < MAX_LIST_ITEMS);
-      return { byEntity, byAddr };
+      return { byEntity, byAddr, symbols, slots };
     })();
     this.#names = { revision, value };
     value.catch(() => {
@@ -573,7 +644,7 @@ export class AnalysisSession {
 
   async strings() {
     const map = await this.#loadStrings();
-    return [...map.entries()].map(([addr, s]) => ({ addr, ...s }));
+    return [...map.entries()].map(([addr, s]) => ({ addr, text: s.text, encoding: s.encoding, id: s.id }));
   }
 
   async symbols() {
@@ -646,6 +717,37 @@ export class AnalysisSession {
 
   /** Disassembly plus CFG of one function, with operand constants resolved to names. */
   async listing(functionId: string) {
+    const core = await this.#cachedListing(functionId);
+    const comments = await this.#workspace.comments(this.record.id);
+    const inRange = new Set(core.instructions.map((i) => i.addr));
+    return { ...core, comments: Object.fromEntries(Object.entries(comments).filter(([a]) => inRange.has(a))) };
+  }
+
+  /**
+   * A function's listing at this revision. `withCfg` false (the whole-image listing): the full
+   * listing when cached, else one without the CFG blocks, nor the resolved targets of an
+   * import stub (its name says it all) — two OpenDecomp requests fewer per function.
+   */
+  #cachedListing(functionId: string, withCfg = true): Promise<ListingCore> {
+    const revision = this.binary.revision;
+    if (this.#listings?.revision !== revision) this.#listings = { revision, map: new Map(), ready: new Set() };
+    const { map, ready } = this.#listings;
+    const key = withCfg ? functionId : `lite:${functionId}`;
+    let p = map.get(functionId) ?? map.get(key);
+    if (p) {
+      map.delete(key);
+      map.set(key, p);
+      return p;
+    }
+    p = this.#buildListing(functionId, withCfg);
+    map.set(key, p);
+    p.then(() => ready.add(functionId), () => undefined);
+    p.catch(() => map.get(key) === p && map.delete(key));
+    while (map.size > 512) map.delete(map.keys().next().value!);
+    return p;
+  }
+
+  async #buildListing(functionId: string, withCfg: boolean): Promise<ListingCore> {
     const fn = await this.functionById(functionId);
     type Compact = {
       id: string;
@@ -673,22 +775,24 @@ export class AnalysisSession {
 
     const blocksRaw: { id: string; ranges: { start: { value: string } }[]; instructions: string[]; edges: { to: string | null; target: { value: string } | null; kind: string; conditional: boolean }[] }[] = [];
     cursor = undefined;
-    do {
+    while (withCfg) {
       const data = need(
         await this.binary.getFunction(functionId, { view: 'cfg', page: { limit: 1000, ...(cursor ? { cursor } : {}) } }),
       ) as { items: typeof blocksRaw; page: { next_cursor: string | null } };
       blocksRaw.push(...data.items);
       cursor = data.page.next_cursor ?? undefined;
-    } while (cursor);
+      if (!cursor) break;
+    }
 
     const index = await this.functions();
     const strings = await this.#loadStrings();
-    const comments = await this.#workspace.comments(this.record.id);
     // Resolved targets are a nicety: a listing without them is still a listing.
     const [outgoing, names] = await Promise.all([
-      this.#outgoing(functionId).catch(() => new Map<string, never[]>()),
-      this.#loadNames().catch(() => ({ byEntity: new Map<string, string>(), byAddr: new Map<string, string>() })),
+      withCfg || !fn.importStub ? this.#outgoing(functionId).catch(() => new Map<string, never[]>()) : new Map<string, never[]>(),
+      this.#loadNames().catch((): Names => ({ byEntity: new Map(), byAddr: new Map(), symbols: new Map(), slots: new Map() })),
     ]);
+    // Globals renamed here: their name is an annotation on the data entity, not on the symbol.
+    const globals = (await this.#workspace.data(this.record.id)).names;
     const bytes = await this.#instructionBytes(raw.map((i) => ({ addr: BigInt(i.address.value), size: i.size })));
 
     const idToAddr = new Map<string, string>();
@@ -707,7 +811,7 @@ export class AnalysisSession {
         else if (targets.includes(a)) refs.push({ text: c.text, addr: a, kind: 'code', label: '' });
         // A memory operand naming a mapped address, or an immediate that looks like a pointer.
         else if ((c.inMemory || c.value >= 0x10000n) && (await this.#isMapped(c.value)))
-          refs.push({ text: c.text, addr: a, kind: 'data', label: '' });
+          refs.push({ text: c.text, addr: a, kind: 'data', label: globals[a] ?? names.symbols.get(a) ?? '' });
       }
       const resolved: Instruction['resolved'] = [];
       for (const r of outgoing.get(addr) ?? []) {
@@ -717,7 +821,7 @@ export class AnalysisSession {
         if (!to && r.kind === 'branch') continue;
         const f = (to ? index.byEntry.get(to) : undefined) ?? (r.to_entity ? index.byId.get(r.to_entity) : undefined);
         const s = to ? strings.get(to) : undefined;
-        const name = (r.to_entity ? names.byEntity.get(r.to_entity) : undefined) ?? (to ? names.byAddr.get(to) : undefined);
+        const name = (to ? globals[to] : undefined) ?? (r.to_entity ? names.byEntity.get(r.to_entity) : undefined) ?? (to ? names.byAddr.get(to) : undefined);
         const item: Instruction['resolved'][number] | null = f
           ? { addr: f.entry, kind: 'function', label: f.name, access: r.kind }
           : s && to
@@ -747,48 +851,339 @@ export class AnalysisSession {
       insns: b.instructions.map((id) => idToAddr.get(id)).filter((a): a is string => !!a),
       edges: b.edges.map((e) => ({ to: e.to, target: e.target ? canon(e.target.value) : null, kind: e.kind, conditional: e.conditional })),
     }));
-    const inRange = (a: string) => insns.some((i) => i.addr === a);
-    return {
-      function: fn,
-      instructions: insns,
-      blocks,
-      gaps,
-      comments: Object.fromEntries(Object.entries(comments).filter(([a]) => inRange(a))),
-    };
+    return { function: fn, instructions: insns, blocks, gaps };
   }
 
+  /** Each instruction's bytes as hex, read through the page cache. */
   async #instructionBytes(items: { addr: bigint; size: number }[]): Promise<Map<string, string>> {
     const out = new Map<string, string>();
-    if (items.length === 0) return out;
-    // Read contiguous runs (functions may be split into several ranges).
-    const sorted = [...items].sort((a, b) => (a.addr < b.addr ? -1 : 1));
-    let runStart = sorted[0]!.addr;
-    let runEnd = runStart;
-    const runs: [bigint, bigint][] = [];
-    for (const it of sorted) {
-      if (it.addr > runEnd + 64n || it.addr + BigInt(it.size) - runStart > 65536n) {
-        runs.push([runStart, runEnd]);
-        runStart = it.addr;
-      }
-      runEnd = it.addr + BigInt(it.size) > runEnd ? it.addr + BigInt(it.size) : runEnd;
-    }
-    runs.push([runStart, runEnd]);
-    const chunks: { start: bigint; hex: string }[] = [];
-    for (const [s, e] of runs) {
-      try {
-        const mem = await this.memory(canon(s), Number(e - s));
-        for (const seg of mem.segments) if (seg.hex) chunks.push({ start: BigInt(seg.start), hex: seg.hex });
-      } catch {
-        // Bytes are cosmetic; a failed read leaves them empty.
-      }
-    }
     for (const it of items) {
-      const c = chunks.find((c) => it.addr >= c.start && it.addr + BigInt(it.size) <= c.start + BigInt(c.hex.length / 2));
-      if (!c) continue;
-      const off = Number(it.addr - c.start) * 2;
-      out.set(canon(it.addr), c.hex.slice(off, off + it.size * 2));
+      const bytes = await this.#read(it.addr, it.size);
+      out.set(canon(it.addr), Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join(''));
     }
     return out;
+  }
+
+  // ------------------------------------------------- whole-image listing
+
+  /** `len` bytes at `start` through a page cache; zero where nothing is mapped. */
+  async #read(start: bigint, len: number): Promise<Uint8Array> {
+    const out = new Uint8Array(len);
+    const end = start + BigInt(len);
+    for (let page = start - (start % 4096n); page < end; page += 4096n) {
+      let p = this.#pages.get(page);
+      if (p) {
+        this.#pages.delete(page);
+        this.#pages.set(page, p);
+      } else {
+        p = this.memory(canon(page), 4096).then(
+          (mem) => {
+            const bytes = new Uint8Array(4096);
+            for (const seg of mem.segments) {
+              if (!seg.hex) continue;
+              const off = Number(BigInt(seg.start) - page);
+              for (let i = 0; i < seg.size && off + i < 4096; i++) bytes[off + i] = parseInt(seg.hex.slice(i * 2, i * 2 + 2), 16);
+            }
+            return bytes;
+          },
+          () => new Uint8Array(4096),
+        );
+        this.#pages.set(page, p);
+        while (this.#pages.size > 1024) this.#pages.delete(this.#pages.keys().next().value!);
+      }
+      const bytes = await p;
+      const from = page > start ? page : start;
+      const to = page + 4096n < end ? page + 4096n : end;
+      out.set(bytes.subarray(Number(from - page), Number(to - page)), Number(from - start));
+    }
+    return out;
+  }
+
+  #loadRelocations() {
+    this.#relocations ??= (async () => {
+      type Row = { address: { space: string; value: string }; width_bits: number; target: { space: string; value: string } | null; symbol_id: string | null };
+      const rows = (await this.#binaryInfoList('relocations').catch(() => [])) as Row[];
+      return rows
+        .filter((r) => r.address.space === 'va' && (r.width_bits === 64 || r.width_bits === 32))
+        .map((r) => ({
+          addr: BigInt(r.address.value),
+          width: r.width_bits / 8,
+          target: r.target?.space === 'va' ? BigInt(r.target.value) : null,
+          symbol: r.symbol_id,
+        }));
+    })();
+    return this.#relocations;
+  }
+
+  /** The image's mapped sections (its segments when it has no sections), for the listing. */
+  #layoutSections(): Promise<LayoutSection[]> {
+    this.#sectionsOnce ??= this.#readLayoutSections();
+    this.#sectionsOnce.catch(() => (this.#sectionsOnce = null));
+    return this.#sectionsOnce;
+  }
+
+  /** The sections mapped in VA space (the segments when the image has no sections): what the listing, search and navigation band cover. */
+  async #mappedSections() {
+    const all = (await this.sections()).filter((s) => s.start && s.size > 0 && s.permissions.length > 0);
+    const sections = all.filter((s) => s.kind === 'section');
+    return sections.length ? sections : all;
+  }
+
+  async #readLayoutSections(): Promise<LayoutSection[]> {
+    return (await this.#mappedSections()).map((s) => {
+      const start = BigInt(s.start!);
+      return { name: s.name, start, end: start + BigInt(s.size), fileEnd: start + BigInt(s.fileOffset === null ? 0 : s.fileSize), perms: s.permissions };
+    });
+  }
+
+  /** The listing at the current revision and data definitions. */
+  #linearListing(): Promise<LinearListing> {
+    const key = `${this.binary.revision}/${this.#dataVersion}`;
+    if (this.#linear?.key === key) return this.#linear.value;
+    const value = (async () => {
+      const [index, strings, names, relocations, sections, data] = await Promise.all([
+        this.functions(),
+        this.#loadStrings(),
+        this.#loadNames().catch((): Names => ({ byEntity: new Map(), byAddr: new Map(), symbols: new Map(), slots: new Map() })),
+        this.#loadRelocations(),
+        this.#layoutSections(),
+        this.#workspace.data(this.record.id),
+      ]);
+      const pointerSize = BigInt(this.binary.image.target.address_bits / 8);
+      // Priority on overlaps: function entry ranges, other function ranges, user data, pointers, strings.
+      const candidates: LayoutItem[] = [];
+      const chunks: LayoutItem[] = [];
+      for (const fn of index.list)
+        for (const [start, end] of index.ranges.get(fn.id) ?? []) {
+          const entry = start === BigInt(fn.entry);
+          (entry ? candidates : chunks).push({ kind: 'code', start, end, fnId: fn.id, entry });
+        }
+      candidates.push(...chunks);
+      for (const [addr, def] of Object.entries(data.defs)) {
+        const start = BigInt(addr);
+        candidates.push({ kind: 'def', start, end: start + BigInt(defSize(def)), def: { type: def.type, count: def.count } });
+      }
+      for (const r of relocations)
+        candidates.push({ kind: 'pointer', start: r.addr, end: r.addr + BigInt(r.width), target: r.target, symbol: r.symbol ? (names.byEntity.get(r.symbol) ?? null) : null });
+      for (const [addr, name] of names.slots) {
+        const start = BigInt(addr);
+        candidates.push({ kind: 'pointer', start, end: start + pointerSize, target: null, symbol: name });
+      }
+      for (const [addr, str] of strings) {
+        const start = BigInt(addr);
+        const nul = str.terminated ? (str.encoding === 'utf16le' ? 2 : 1) : 0;
+        candidates.push({ kind: 'string', start, end: start + BigInt(str.length + nul), text: str.text, encoding: str.encoding, terminated: str.terminated });
+      }
+      const labels = new Map(names.symbols);
+      for (const f of index.list) labels.delete(f.entry);
+      for (const [addr, name] of Object.entries(data.names)) labels.set(addr, name);
+      const layout = buildLayout(sections, candidates, labels);
+      const refAt = (a: bigint): DataRef | null => {
+        const k = canon(a);
+        const f = index.byEntry.get(k);
+        if (f) return { addr: k, kind: 'function', label: f.name };
+        const s = strings.get(k);
+        if (s) return { addr: k, kind: 'string', label: quoteC(s.text.length > 40 ? `${s.text.slice(0, 40)}…` : s.text) };
+        const l = labels.get(k);
+        if (l) return { addr: k, kind: 'data', label: l };
+        const slot = names.slots.get(k);
+        if (slot) return { addr: k, kind: 'import', label: slot };
+        const it = itemAt(layout, a);
+        const fn = it?.kind === 'code' ? index.byId.get(it.fnId) : undefined;
+        if (fn) return { addr: k, kind: 'code', label: `${fn.name}+0x${(a - BigInt(fn.entry)).toString(16)}` };
+        return null;
+      };
+      return new LinearListing(layout, {
+        read: (start, len) => this.#read(start, len),
+        listing: (fnId) => this.#cachedListing(fnId, false),
+        listed: (fnId) => this.#listings?.revision === this.binary.revision && this.#listings.ready.has(fnId),
+        refAt,
+      });
+    })();
+    this.#linear = { key, value };
+    value.catch(() => {
+      if (this.#linear?.value === value) this.#linear = null;
+    });
+    return value;
+  }
+
+  /**
+   * Builds the listing around `addr` after a change, before the UI hears of it: the UI's
+   * reload is then served from the caches instead of waiting behind the re-decompilation
+   * the new revision starts.
+   */
+  async #warm(addr: string): Promise<void> {
+    await this.linear(addr, 40, 80).catch(() => undefined);
+  }
+
+  /** Rows of the whole-image listing around an address (see linear.ts). */
+  async linear(addr: string, before: number, after: number, quick = false) {
+    const listing = await this.#linearListing();
+    return listing.window(BigInt(addr), before, after, quick);
+  }
+
+  // ------------------------------------------------------- data definitions
+
+  /** The user data definition at `addr` and how many elements an array there can hold. */
+  async dataAt(addr: string) {
+    const listing = await this.#linearListing();
+    const a = BigInt(addr);
+    const item = itemAt(listing.layout, a);
+    const def = item?.kind === 'def' ? item : null;
+    const start = def ? def.start : a;
+    const type: DataType = def && def.def.type !== 'string' ? def.def.type : 'u8';
+    return { start: canon(start), def: def?.def ?? null, type, maxCount: Number(this.#room(listing, start) / BigInt(elementSize(type))) };
+  }
+
+  /** Bytes from `start` to the next function, item or label, or the section end. */
+  #room(listing: LinearListing, start: bigint): bigint {
+    const { layout } = listing;
+    const sec = layout.sections[sectionIndex(layout.sections, start)];
+    if (!sec) return 0n;
+    let end = sec.end;
+    for (const it of layout.items) if (it.start > start && it.start < end && it.kind !== 'def') end = it.start;
+    for (const l of layout.labelAt) if (l > start && l < end) end = l;
+    return end - start;
+  }
+
+  /**
+   * IDA's data keys at an address: D cycles byte/word/dword/qword, A makes a C string,
+   * O a pointer, * an array of `count` elements, U undefines. Definitions are kept in the
+   * workspace (they drive the listing) and declared to OpenDecomp as an asserted `type`
+   * annotation on the global, so the decompiler types it too where OpenDecomp accepts the
+   * address as data storage.
+   */
+  defineData(addr: string, action: DataAction, count = 0) {
+    // One at a time: each reads the definitions the previous one wrote.
+    return this.#dataOps.run(() => this.#defineData(addr, action, count));
+  }
+
+  async #defineData(addr: string, action: DataAction, count: number) {
+    const listing = await this.#linearListing();
+    const { layout } = listing;
+    const a = BigInt(addr);
+    const sec = layout.sections[sectionIndex(layout.sections, a)];
+    if (!sec) throw new ApiError(400, `${addr} is not in a mapped section`);
+    const item = itemAt(layout, a);
+    if (item?.kind === 'code') {
+      const fn = (await this.functions()).byId.get(item.fnId);
+      throw new ApiError(400, `${addr} is code of ${fn?.name ?? 'a function'}: OpenDecomp has no way to undefine code`);
+    }
+    const current = item?.kind === 'def' ? item : null;
+    const start = current ? current.start : a;
+    let def: DataDef | null;
+    if (action === 'undefine') {
+      if (!current)
+        throw new ApiError(400, item ? 'This item comes from OpenDecomp (a string or a pointer), not from a definition: define another type over it instead' : 'Nothing is defined here');
+      def = null;
+    } else if (action === 'cycle') {
+      const order: DataType[] = ['u8', 'u16', 'u32', 'u64'];
+      def = { type: order[((current ? order.indexOf(current.def.type) : -1) + 1) % order.length]!, count: 1 };
+    } else if (action === 'ptr') def = { type: 'ptr', count: 1 };
+    else if (action === 'string') {
+      const room = Number(sec.end - start < 4096n ? sec.end - start : 4096n);
+      def = { type: 'string', count: cStringLength(await this.#read(start, room)) ?? room };
+    } else {
+      if (!Number.isSafeInteger(count) || count < 1) throw new ApiError(400, 'An array needs at least one element');
+      def = { type: current && current.def.type !== 'string' ? current.def.type : 'u8', count };
+    }
+    const end = start + BigInt(def ? defSize(def) : 0);
+    if (end > sec.end) throw new ApiError(400, `That runs past the end of ${sec.name}`);
+    if (layout.items.some((it) => it.kind === 'code' && it.start < end && it.end > start)) throw new ApiError(400, 'That overlaps a function');
+
+    const key = canon(start);
+    const { replaced, note } = await this.#putDefs(start, end > start ? end : (current?.end ?? start + 1n), def ? { [key]: def } : {});
+    return { revision: this.binary.revision, start: key, def, note, replaced, range: this.#range(start, end, replaced) };
+  }
+
+  /** [start, end) covering a definition and the ones it replaced (what an undo restores). */
+  #range(start: bigint, end: bigint, defs: Record<string, DataDef>): { start: string; end: string } {
+    let lo = start;
+    let hi = end > start ? end : start + 1n;
+    for (const [k, d] of Object.entries(defs)) {
+      const s = BigInt(k);
+      const e = s + BigInt(defSize(d));
+      if (s < lo) lo = s;
+      if (e > hi) hi = e;
+    }
+    return { start: canon(lo), end: canon(hi) };
+  }
+
+  /** Undo/redo of data definitions: the definitions overlapping [start, end) become exactly `defs`. */
+  restoreData(start: string, end: string, defs: Record<string, DataDef>) {
+    return this.#dataOps.run(async () => {
+      for (const [k, d] of Object.entries(defs))
+        if (!DATA_TYPES.includes(d.type) || !Number.isSafeInteger(d.count) || d.count < 1 || BigInt(k) < BigInt(start) || BigInt(k) >= BigInt(end))
+          throw new ApiError(400, `Invalid data definition at ${k}`);
+      const { note } = await this.#putDefs(BigInt(start), BigInt(end), defs);
+      return { revision: this.binary.revision, note };
+    });
+  }
+
+  /**
+   * Replaces the definitions overlapping [start, end) by `defs`, in the workspace and in
+   * OpenDecomp (one annotation batch). Returns the replaced definitions.
+   */
+  async #putDefs(start: bigint, end: bigint, defs: Record<string, DataDef>) {
+    const data = await this.#workspace.data(this.record.id);
+    const replacedEntries = Object.entries(data.defs).filter(
+      ([k, d]) => k in defs || (BigInt(k) < end && BigInt(k) + BigInt(defSize(d)) > start),
+    );
+    const replaced = Object.fromEntries(replacedEntries.map(([k, d]) => [k, { type: d.type, count: d.count }]));
+    for (const [k] of replacedEntries) delete data.defs[k];
+    const remove = (ks: string[]) => ks.map((k) => ({ operation: 'remove', id: annotationId(`type:va:${k}`) }));
+    // A new type at the same address overwrites the annotation there; the others are removed.
+    const declared = replacedEntries.filter(([, d]) => d.od).map(([k]) => k);
+    const removes = remove(declared.filter((k) => !(k in defs)));
+    const stored = Object.entries(defs).map(([k, d]) => [k, (data.defs[k] = { type: d.type, count: d.count, od: false as boolean })] as const);
+    let note: string | null = null;
+    if (stored.length) {
+      const edits = new Map<string, unknown>();
+      for (const e of [...removes, ...stored.flatMap(([k, d]) => this.#dataTypeEdits(k, d))]) edits.set((e as { id: string }).id, e);
+      try {
+        await this.#writes.run(() => this.#apply([...edits.values()]));
+        for (const [, d] of stored) d.od = true;
+      } catch (error) {
+        note = `kept in the listing only: OpenDecomp did not accept a type here (${error instanceof Error ? error.message.split('\n')[0] : String(error)})`;
+        const stale = [...removes, ...remove(declared.filter((k) => k in defs))];
+        if (stale.length) await this.#writes.run(() => this.#apply(stale)).catch(() => undefined);
+      }
+    } else if (removes.length) await this.#writes.run(() => this.#apply(removes)).catch(() => undefined);
+    await this.#workspace.setData(this.record.id, data);
+    this.#dataVersion++;
+    await this.#warm(canon(start));
+    return { replaced, note };
+  }
+
+  /** `type` annotations declaring the global at `addr` as `def`; the types it refers to go on the type library. */
+  #dataTypeEdits(addr: string, def: DataDef): unknown[] {
+    type Definition = Parameters<typeof encodeTypeDefinition>[0];
+    const slice = this.binary.image.selected_slice_id;
+    const idOf = (d: Definition) => entityIdentity(slice, 'open-reverse-type', [JSON.stringify(encodeTypeDefinition(d))]);
+    const helpers: Definition[] = [];
+    let root: Definition;
+    if (def.type === 'ptr') {
+      const v = { kind: 'void' } as Definition;
+      helpers.push(v);
+      root = { kind: 'pointer', to: idOf(v), bits: 64 } as Definition;
+    } else root = { kind: 'integer', bits: elementSize(def.type) * 8, signed: def.type === 'string' } as Definition;
+    if (def.type === 'string' || def.count > 1) {
+      helpers.push(root);
+      root = { kind: 'array', element: idOf(root), count: BigInt(def.count) } as Definition;
+    }
+    const library = typeLibraryIdentity(slice);
+    const type = (d: Definition) => ({ kind: 'type', type_id: idOf(d), definition: encodeTypeDefinition(d) });
+    return [
+      ...helpers.map((d) => ({ operation: 'set', id: annotationId(`library-type:${idOf(d)}`), entity_id: library, value: type(d), status: 'asserted', evidence_ids: [] })),
+      {
+        operation: 'set',
+        id: annotationId(`type:va:${addr}`),
+        address: { image_id: this.binary.image.id, space: 'va', value: addr },
+        value: type(root),
+        status: 'asserted',
+        evidence_ids: [],
+      },
+    ];
   }
 
   // -------------------------------------------------------------- decompile
@@ -954,43 +1349,16 @@ export class AnalysisSession {
 
   #regions: Promise<Region[]> | null = null;
 
-  /** The image's sections mapped in VA space (else its mappings): what search reads and the strip shows. */
+  /** The mapped sections, as search reads them and the navigation band shows them. */
   regions(): Promise<Region[]> {
-    this.#regions ??= (async () => {
-      type Row = {
-        name: string;
-        kind: string;
-        virtual_range: { start: { space: string; value: string }; size: string } | null;
-        file_range: { size: string } | null;
-        permissions: string[];
-        flags?: string;
-      };
-      const macho = this.binary.image.target.format === 'macho';
-      const rows = (await this.#binaryInfoList('sections')) as Row[];
-      const sections: Region[] = rows
-        .filter((r) => r.kind === 'section' && r.virtual_range?.start.space === 'va' && BigInt(r.virtual_range.size) > 0n)
-        .map((r) => {
-          const size = Number(BigInt(r.virtual_range!.size));
-          return {
-            name: r.name,
-            start: BigInt(r.virtual_range!.start.value),
-            size,
-            fileSize: r.file_range ? Math.min(size, Number(BigInt(r.file_range.size))) : 0,
-            // Mach-O sections carry their segment's permissions: __TEXT,__const is not code.
-            exec: macho ? (Number(r.flags ?? 0) & 0x80000400) !== 0 : r.permissions.includes('execute'),
-          };
-        });
-      if (sections.length) return sections;
-      return (await this.#loadMappings())
-        .filter((m) => m.perms.length > 0 && m.memSize > 0n)
-        .map((m) => ({
-          name: canon(m.va),
-          start: m.va,
-          size: Number(m.memSize),
-          fileSize: Number(m.fileSize < m.memSize ? m.fileSize : m.memSize),
-          exec: m.perms.includes('execute'),
-        }));
-    })();
+    this.#regions ??= (async () =>
+      (await this.#mappedSections()).map((s) => ({
+        name: s.name,
+        start: BigInt(s.start!),
+        size: s.size,
+        fileSize: s.fileOffset === null ? 0 : Math.min(s.size, s.fileSize),
+        exec: s.exec,
+      })))();
     this.#regions.catch(() => (this.#regions = null));
     return this.#regions;
   }
@@ -1010,6 +1378,11 @@ export class AnalysisSession {
     const cache = this.#insnText;
     const hit = cache.byFunction.get(functionId);
     if (hit) return hit;
+    // A function the listing already disassembled at this revision is not fetched again.
+    if (this.#listings?.revision === revision && this.#listings.ready.has(functionId)) {
+      const listed = this.#listings.map.get(functionId) ?? this.#listings.map.get(`lite:${functionId}`);
+      if (listed) return (await listed).instructions;
+    }
     type Compact = { address: { value: string }; presentation: { mnemonic: string; operands: string } | null };
     const out: { addr: string; mnemonic: string; operands: string }[] = [];
     let cursor: string | undefined;
@@ -1049,26 +1422,28 @@ export class AnalysisSession {
     }
   }
 
-  #navMap: { revision: number; value: Promise<NavMap> } | null = null;
+  #navMap: { revision: string; value: Promise<NavMap> } | null = null;
 
   /** The navigation strip's map (functions, strings, data symbols over the mapped sections), per revision. */
   navMap(): Promise<NavMap> {
-    const revision = this.binary.revision;
+    const revision = `${this.binary.revision}/${this.#dataVersion}`;
     if (this.#navMap?.revision === revision) return this.#navMap.value;
     const value = (async () => {
-      const [regions, index, strings, symbols] = await Promise.all([
+      const [regions, index, strings, symbols, data] = await Promise.all([
         this.regions(),
         this.functions(),
         this.#loadStrings(),
         this.symbols().catch(() => []),
+        this.#workspace.data(this.record.id),
       ]);
       const items: { start: bigint; size: number; kind: NavKind }[] = [];
       for (const s of symbols)
         if (s.kind === 'object' && s.addr && !index.byEntry.has(s.addr)) items.push({ start: BigInt(s.addr), size: s.size || 1, kind: 'data' });
-      const utf8 = new TextEncoder();
-      for (const [addr, s] of strings)
-        items.push({ start: BigInt(addr), size: /16/.test(s.encoding) ? 2 * (s.text.length + 1) : utf8.encode(s.text).length + 1, kind: 'string' });
-      for (const f of index.list) items.push({ start: BigInt(f.entry), size: f.size, kind: f.importStub ? 'import' : 'code' });
+      // Data defined with D / A / O / *: a string definition shows as a string.
+      for (const [addr, def] of Object.entries(data.defs)) items.push({ start: BigInt(addr), size: defSize(def), kind: def.type === 'string' ? 'string' : 'data' });
+      for (const [addr, s] of strings) items.push({ start: BigInt(addr), size: s.length + (s.terminated ? 1 : 0), kind: 'string' });
+      for (const f of index.list)
+        for (const [start, end] of index.ranges.get(f.id) ?? []) items.push({ start, size: Number(end - start), kind: f.importStub ? 'import' : 'code' });
       return buildNavMap(regions, items);
     })();
     this.#navMap = { revision, value };
@@ -1083,8 +1458,7 @@ export class AnalysisSession {
   /** Rename a function (by entity id) or a global (by address). An empty name restores the original. */
   async rename(target: { id?: string; addr?: string }, name: string) {
     const trimmed = name.trim();
-    if (trimmed !== '' && !/^[A-Za-z_][A-Za-z0-9_:$.@]*$/.test(trimmed))
-      throw new ApiError(400, 'Names must be identifiers (letters, digits, _ : $ . @)');
+    if (trimmed !== '' && !NAME_RE.test(trimmed)) throw new ApiError(400, NAME_ERROR);
     const key = target.id ? `name:${target.id}` : `name:va:${canon(target.addr!)}`;
     const id = annotationId(key);
     return this.#writes.run(async () => {
@@ -1113,6 +1487,36 @@ export class AnalysisSession {
       this.binary.revision = data.revision;
       return { revision: data.revision };
     });
+  }
+
+  /**
+   * Renames a global (N in the listing). The name is an OpenDecomp annotation where OpenDecomp
+   * takes the address as data storage, and is kept for the listing's labels either way.
+   */
+  renameGlobal(addr: string, name: string) {
+    return this.#dataOps.run(() => this.#renameGlobal(addr, name));
+  }
+
+  async #renameGlobal(addr: string, name: string) {
+    const key = canon(addr);
+    if (name.trim() !== '' && !NAME_RE.test(name.trim())) throw new ApiError(400, NAME_ERROR);
+    let note: string | null = null;
+    let result: { revision: number };
+    try {
+      result = await this.rename({ addr: key }, name);
+    } catch (error) {
+      const listing = await this.#linearListing();
+      if (!(error instanceof ApiError) || itemAt(listing.layout, BigInt(key))?.kind === 'code' || sectionIndex(listing.layout.sections, BigInt(key)) < 0) throw error;
+      note = `kept in the listing only: ${error.message.split('\n')[0]}`;
+      result = { revision: this.binary.revision };
+    }
+    const data = await this.#workspace.data(this.record.id);
+    if (name.trim()) data.names[key] = name.trim();
+    else delete data.names[key];
+    await this.#workspace.setData(this.record.id, data);
+    this.#dataVersion++;
+    await this.#warm(key);
+    return { ...result, note };
   }
 
   /** Applies one annotation batch at the current revision; every error diagnostic is reported. */
