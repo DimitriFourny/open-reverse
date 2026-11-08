@@ -221,6 +221,16 @@ function readCentral(bytes: Uint8Array, limits: ZipLimits): CentralRecord[] {
   return out;
 }
 
+/** The entry names of a ZIP archive (central directory only, nothing inflated); null when `bytes` is not one. */
+export function zipEntryNames(bytes: Uint8Array, limits: ZipLimits = DEFAULT_ZIP_LIMITS): string[] | null {
+  if (bytes.length < 22 || bytes[0] !== 0x50 || bytes[1] !== 0x4b) return null;
+  try {
+    return readCentral(bytes, limits).map((r) => r.path);
+  } catch {
+    return null;
+  }
+}
+
 /** Reads every entry of a ZIP archive, within `limits`. Directory entries are returned with empty data. */
 export async function zipDecode(bytes: Uint8Array, limits: ZipLimits = DEFAULT_ZIP_LIMITS, signal?: AbortSignal): Promise<ZipEntry[]> {
   const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);

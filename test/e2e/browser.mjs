@@ -8,6 +8,7 @@
 // PLAYWRIGHT_PATH (a playwright package directory, when it is not installed here), E2E_TMP (scratch directory),
 // E2E_LOG (a file to write a timestamped trace to: console messages, workers, toasts, task panel, failures in full).
 import { appendFileSync, existsSync, mkdirSync, readFileSync } from 'node:fs';
+import { createServer } from 'node:http';
 import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -311,6 +312,49 @@ process.on('unhandledRejection', (e) => {
       await page.waitForSelector('.pline', { timeout: 120000 });
     });
   }
+  /** Runs a script in the open console and returns its output lines (`print: …`, `result: …`, `error: …`). */
+  const runScript = async (code) => {
+    const before = await page.locator('.script-output .out-input').count();
+    await page.fill('.script-editor', code);
+    await page.locator('.script-editor').press('Control+Enter');
+    await page.waitForFunction((n) => document.querySelectorAll('.script-output .out-input').length > n && !document.querySelector('.script-output .busy'), before, { timeout: 120000 });
+    // The output of this run: everything after its echoed input.
+    return page.$$eval('.script-output pre', (els) => {
+      const i = els.findLastIndex((e) => e.classList.contains('out-input'));
+      return els.slice(i + 1).map((e) => `${e.className.replace('out-', '')}: ${e.textContent}`);
+    });
+  };
+  /** X, the Calls tab and the script API all list the calls to an import stub (OpenDecomp names the import, not the stub, as their target). */
+  const stubCallers = async (stub, caller, sites) => {
+    await page.locator('.side-item', { hasText: stub }).first().click();
+    await page.waitForSelector(`.side-item.active:has-text("${stub}")`, { timeout: 60000 });
+    await page.locator('.row.insn.cur-fn .addr').first().click(); // not an operand: X names the function
+    await page.keyboard.press('x');
+    await page.waitForSelector(`.panel-head:has-text("Xrefs to ${stub}")`);
+    await page.waitForSelector(`.xref-table tbody tr:has-text("${caller}")`, { timeout: 60000 });
+    const rows = await page.locator('.xref-table tbody tr').count();
+    if (rows !== sites) throw new Error(`X: ${rows} xrefs, expected ${sites}`);
+    await page.keyboard.press('Escape');
+    await page.locator('.tabs button', { hasText: 'Calls' }).click();
+    await page.waitForSelector(`.call-root:has-text("${stub}")`);
+    const node = page.locator('.call-node', { hasText: caller }).first();
+    await node.waitFor({ timeout: 60000 });
+    if (sites > 1 && !(await node.textContent()).includes(`×${sites}`)) throw new Error(`Callers: ${await node.textContent()}`);
+    await page.locator('.tabs button', { hasText: 'Functions' }).click();
+    await page.locator('.statusbar').click();
+    await page.keyboard.press('Shift+F2');
+    await page.waitForSelector('.script-editor:focus');
+    const out = await runScript(`return [(await or.xrefsTo('${stub}')).length, (await or.callers('${stub}')).map((c) => c.name + ' ' + c.sites)]`);
+    if (out[0] !== `result: [${sites}, ["${caller} ${sites}"]]`) throw new Error(`script: ${out}`);
+    await page.locator('.script-console .close').click();
+    await page.waitForSelector('.script-console', { state: 'detached' });
+  };
+  await step('xrefs to an import stub: X, Callers and or.xrefsTo (_puts)', async () => {
+    await page.locator('.brand').click();
+    await page.locator('.recent-item', { hasText: 'macho-arm64-symbols' }).click();
+    await page.waitForSelector('.row.insn', { timeout: 120000 });
+    await stubCallers('_puts', '_main', 1);
+  });
   await step('whole-image listing: sections, strings, GOT, data keys, rename and xrefs on data', async () => {
     await page.locator('.brand').click();
     await page.locator('.recent-item', { hasText: 'macho-arm64-symbols' }).click();
@@ -526,20 +570,22 @@ process.on('unhandledRejection', (e) => {
     await page.waitForSelector('.search-panel', { state: 'detached' });
     await page.locator('button', { hasText: 'Search…' }).click();
     if ((await page.locator('.search-table tbody tr').count()) !== pat.length) throw new Error('results lost on reopen');
+    // Wait for the hit's own address: the status bar already shows the previous cursor, and a
+    // navigation landing after this step ends would move the cursor under the next one.
+    const hit = BigInt(`0x${await page.locator('.search-table tbody tr td.addr').first().textContent()}`);
     await page.locator('.search-table tbody tr').first().click();
-    await page.waitForFunction(() => /^0x[0-9a-f]+$/.test(document.querySelector('.statusbar span')?.textContent ?? ''));
+    await page.waitForFunction((a) => { const t = document.querySelector('.statusbar span')?.textContent ?? ''; return /^0x[0-9a-f]+$/.test(t) && BigInt(t) === BigInt(a); }, `0x${hit.toString(16)}`);
     await page.keyboard.press('Escape');
   });
   await step('navigation band: hover names the place, click goes there', async () => {
     const box = await page.locator('.navstrip-canvas').boundingBox();
     if (!box || box.height > 16) throw new Error(`band box ${JSON.stringify(box)}`);
-    const before = await page.locator('.statusbar span').first().textContent();
     // The left end is the first mapped section; go to a quarter of the band.
     await page.mouse.move(box.x + box.width * 0.25, box.y + box.height / 2);
     const tip = await page.locator('.navstrip-tip').textContent();
     if (!/^0x[0-9a-f]+ · \S+/.test(tip)) throw new Error(`tip ${tip}`);
     await page.mouse.click(box.x + box.width * 0.25, box.y + box.height / 2);
-    await page.waitForFunction((b) => document.querySelector('.statusbar span')?.textContent !== b, before, { timeout: 30000 });
+    await page.waitForFunction((t) => t.startsWith(document.querySelector('.statusbar span')?.textContent + ' '), tip, { timeout: 30000 }).catch(() => undefined);
     if (!tip.startsWith((await page.locator('.statusbar span').first().textContent()) + ' ')) throw new Error(`went to ${await page.locator('.statusbar span').first().textContent()}, tip ${tip}`);
     await page.locator('.nav-toggle').click();
     await page.waitForSelector('.navstrip', { state: 'detached' });
@@ -548,17 +594,7 @@ process.on('unhandledRejection', (e) => {
     await page.keyboard.press('Escape'); // back
   });
   await step('script console: list functions, rename (Ctrl+Z undoes it), xrefs to a string, errors, stop, history', async () => {
-    const run = async (code) => {
-      const before = await page.locator('.script-output .out-input').count();
-      await page.fill('.script-editor', code);
-      await page.locator('.script-editor').press('Control+Enter');
-      await page.waitForFunction((n) => document.querySelectorAll('.script-output .out-input').length > n && !document.querySelector('.script-output .busy'), before, { timeout: 120000 });
-      // The output of this run: everything after its echoed input.
-      return page.$$eval('.script-output pre', (els) => {
-        const i = els.findLastIndex((e) => e.classList.contains('out-input'));
-        return els.slice(i + 1).map((e) => `${e.className.replace('out-', '')}: ${e.textContent}`);
-      });
-    };
+    const run = runScript;
     await page.locator('.statusbar').click();
     await page.keyboard.press('Shift+F2');
     await page.waitForSelector('.script-editor:focus');
@@ -622,10 +658,11 @@ return (await or.xrefsTo(s.addr)).length`);
     await page.keyboard.press('Enter');
     await page.waitForSelector('.side-item.renamed:has-text("area")', { timeout: 60000 });
   });
-  if (existsSync(SSHPASS)) await step(`${SSHPASS}: search the fprintf call sequence, "Conflicting", immediate 0x862`, async () => {
+  if (existsSync(SSHPASS)) await step(`${SSHPASS}: xrefs to the _fprintf stub, search the fprintf call sequence, "Conflicting", immediate 0x862`, async () => {
     await page.locator('.brand').click();
     await page.setInputFiles('input[type=file]', SSHPASS);
     await page.waitForSelector('.row.insn', { timeout: 120000 });
+    await stubCallers('_fprintf', '_parse_options', 5);
     // ldr x0,[x8]; adrp x1,…; add x1,x1,#0x862; bl _fprintf
     const seq = await search('Alt+b', '00 01 40 F9 01 00 00 B0 21 88 21 91 ?? ?? ?? 94');
     if (seq.length !== 4 || !seq.every((r) => r.includes('_parse_options+0x'))) throw new Error(`bytes: ${seq}`);
@@ -869,6 +906,54 @@ return (await or.xrefsTo(s.addr)).length`);
     await page.waitForSelector('.side-item:has-text("fixture_maximum")', { timeout: 120000 });
     await page.locator('.side-item', { hasText: 'fixture_check' }).click();
     await page.waitForSelector('.user-comment:has-text("persisted comment")', { timeout: 60000 });
+  });
+
+  await step('open from a URL: ?open= asks first, CORS refusal, a binary and an archive told apart by content', async () => {
+    // Another origin: /cors/ allows the app's origin, /nocors/ does not.
+    const files = { 'macho-arm64-stripped': readFileSync(FIX + 'macho-arm64-stripped'), 'project.bin': readFileSync(archivePath) };
+    let requests = 0;
+    const server = createServer((req, res) => {
+      requests++;
+      const m = /^\/(cors|nocors)\/([^/?]+)$/.exec(req.url ?? '');
+      const body = m && files[m[2]];
+      if (m?.[1] === 'cors') res.setHeader('Access-Control-Allow-Origin', '*');
+      if (!body) return res.writeHead(404).end();
+      res.writeHead(200, { 'Content-Type': 'application/octet-stream', 'Content-Length': body.length }).end(body);
+    });
+    await new Promise((r) => server.listen(0, '127.0.0.1', r));
+    const base = `http://127.0.0.1:${server.address().port}`;
+    const seen = errors.length;
+    try {
+      // A link names a file: nothing is fetched before the user says so, and the parameter leaves the page URL.
+      await page.goto(`${URL_}?open=${encodeURIComponent(`${base}/cors/macho-arm64-stripped`)}`);
+      await page.waitForSelector(`.open-url-confirm .open-url-target:has-text("${base}/cors/macho-arm64-stripped")`);
+      if (page.url().includes('open=')) throw new Error(`parameter kept: ${page.url()}`);
+      await page.locator('.open-url-confirm button', { hasText: 'Cancel' }).click();
+      await page.waitForSelector('.open-url-confirm', { state: 'detached' });
+      if (requests !== 0) throw new Error(`${requests} requests before confirming`);
+      await page.goto(`${URL_}?open=${encodeURIComponent(`${base}/cors/macho-arm64-stripped`)}`);
+      await page.locator('.open-url-confirm button', { hasText: 'Download and open' }).click();
+      await page.waitForSelector('.topbar:has-text("macho-arm64-stripped")', { timeout: 120000 });
+      await page.waitForSelector('.row.insn', { timeout: 120000 });
+      // The server does not allow other sites: a clear error, nothing opened.
+      await page.locator('.brand').click();
+      await page.fill('.open-url-input', `${base}/nocors/macho-arm64-stripped`);
+      await page.locator('.open-url-go').click();
+      await toast('does not allow downloads from other sites');
+      await page.fill('.open-url-input', `${base}/cors/missing`);
+      await page.locator('.open-url-go').click();
+      await toast('HTTP 404');
+      // An archive whatever its name: imported (its binary is in the workspace: replace it), renames come back.
+      page.once('dialog', (d) => d.accept());
+      await page.fill('.open-url-input', `${base}/cors/project.bin`);
+      await page.locator('.open-url-go').click();
+      await page.waitForSelector('.side-item:has-text("my_max")', { timeout: 120000 });
+    } finally {
+      server.close();
+      // Chromium logs the refused and the missing download as console errors: expected here.
+      const expected = /CORS policy|Failed to load resource|ERR_FAILED/;
+      for (let i = errors.length - 1; i >= seen; i--) if (expected.test(errors[i])) errors.splice(i, 1);
+    }
   });
 
   console.log('console errors:', errors.length ? errors : 'none');

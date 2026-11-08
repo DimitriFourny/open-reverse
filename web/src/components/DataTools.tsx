@@ -4,7 +4,8 @@
 
 import { useEffect, useRef, useState, useSyncExternalStore } from 'react';
 import { api, type BinaryRecord, type BinaryUsage, type TaskProgress } from '../api.ts';
-import { closeBinary, getState, openBinary, refreshBinaries, toast, useStore } from '../store.ts';
+import { download, isProjectArchiveBytes, parseRemoteUrl, remoteFileName } from '../remote.ts';
+import { closeBinary, getState, openBinary, refreshBinaries, toast, uploadAndOpen, useStore } from '../store.ts';
 
 const ARCHIVE_EXTENSION = '.orproj.zip';
 
@@ -51,12 +52,14 @@ interface Task {
 
 interface DataState {
   task: Task | null;
+  /** A URL from the page URL waiting for the user's go-ahead before it is downloaded. */
+  confirmUrl: string | null;
   usage: Map<string, BinaryUsage>;
   estimate: { usage: number; quota: number } | null;
   persisted: boolean | null;
 }
 
-let data: DataState = { task: null, usage: new Map(), estimate: null, persisted: null };
+let data: DataState = { task: null, confirmUrl: null, usage: new Map(), estimate: null, persisted: null };
 const listeners = new Set<() => void>();
 function set(patch: Partial<DataState>): void {
   data = { ...data, ...patch };
@@ -141,6 +144,23 @@ export async function importArchive(file: File): Promise<void> {
   }
 }
 
+/** Downloads a binary or a project archive (told apart by content) and opens it like a dropped file. */
+export async function openFromUrl(text: string): Promise<void> {
+  const url = parseRemoteUrl(text);
+  if (!url) return toast(`Not an http(s) URL: ${text}`, 'error');
+  const file = await runTask(`Downloading ${remoteFileName(url, null)} from ${url.host}`, (onProgress, signal) =>
+    download(url, ({ done, total }) => onProgress({ phase: 'download', done, total, detail: `${fmtBytes(done)}${total ? ` of ${fmtBytes(total)}` : ''}` }), signal),
+  );
+  if (!file) return;
+  if (isProjectArchiveBytes(new Uint8Array(await file.arrayBuffer()))) await importArchive(file);
+  else await uploadAndOpen(file);
+}
+
+/** A URL that came with the page (`?open=`) is only downloaded once the user confirms it. */
+export function askOpenUrl(text: string): void {
+  set({ confirmUrl: text });
+}
+
 export async function exportPseudocode(bid: string, name: string): Promise<void> {
   const { language, inference } = getState().options;
   const result = await runTask(`Exporting pseudocode of ${name}`, (onProgress, signal) =>
@@ -202,6 +222,7 @@ const PHASES: Record<string, string> = {
   write: 'Writing the project',
   prepare: 'Collecting functions, symbols and strings',
   decompile: 'Decompiling',
+  download: 'Downloading',
 };
 
 /** The progress panel of the running task (non-modal: the app stays usable). */
@@ -223,7 +244,7 @@ export function TaskDialog() {
         <div className="modal-title">{task.title}</div>
         <div className="task-phase">
           {task.abort.signal.aborted ? 'Cancelling' : p ? (PHASES[p.phase] ?? p.phase) : 'Starting'}
-          {p?.total ? (
+          {p?.total && p.phase !== 'download' ? (
             <span className="dim">
               {' '}
               · {p.done} / {p.total}
@@ -355,6 +376,77 @@ export function ImportArchiveButton() {
         }}
       />
     </>
+  );
+}
+
+/** Home screen: open a binary or a project archive from a URL. */
+export function OpenUrlField() {
+  const [text, setText] = useState('');
+  const busy = useData((s) => s.task !== null);
+  const submit = () => {
+    if (!text.trim()) return;
+    void openFromUrl(text);
+  };
+  return (
+    <form
+      className="open-url"
+      onSubmit={(e) => {
+        e.preventDefault();
+        submit();
+      }}
+    >
+      <input
+        className="open-url-input"
+        type="url"
+        placeholder="https://… a binary or a .orproj.zip"
+        value={text}
+        spellCheck={false}
+        onChange={(e) => setText(e.target.value)}
+        title="The browser downloads the file directly (the server must allow it with CORS). Links can use ?open=<URL>."
+      />
+      <button type="submit" className="open-url-go" disabled={busy || !text.trim()}>
+        Open URL…
+      </button>
+    </form>
+  );
+}
+
+/** Asks before downloading a URL that came from the page URL, so a link cannot silently fetch things. */
+export function OpenUrlConfirm() {
+  const url = useData((s) => s.confirmUrl);
+  const ok = useRef<HTMLButtonElement>(null);
+  useEffect(() => ok.current?.focus(), [url]);
+  if (!url) return null;
+  const valid = parseRemoteUrl(url) !== null;
+  const close = () => set({ confirmUrl: null });
+  return (
+    <div className="modal-backdrop" onMouseDown={(e) => e.target === e.currentTarget && close()}>
+      <div className="modal open-url-confirm" onKeyDown={(e) => e.key === 'Escape' && close()}>
+        <div className="modal-title">Open a file from a link?</div>
+        <p>This page link asks to download and open:</p>
+        <code className="open-url-target">{url}</code>
+        <p className="dim">
+          {valid
+            ? 'Your browser downloads it from that server and opens it here; nothing is uploaded. Open it only if you trust the link.'
+            : 'This is not an http(s) URL and cannot be opened.'}
+        </p>
+        <div className="modal-foot">
+          <button onClick={close}>Cancel</button>
+          {valid && (
+            <button
+              ref={ok}
+              className="primary"
+              onClick={() => {
+                close();
+                void openFromUrl(url);
+              }}
+            >
+              Download and open
+            </button>
+          )}
+        </div>
+      </div>
+    </div>
   );
 }
 

@@ -371,6 +371,9 @@ function sameLoc(a: Location | null, b: Location): boolean {
   return !!a && a.fnId === b.fnId && a.addr === b.addr && a.view === b.view;
 }
 
+/** Counts navigations (go to, back, forward): one that waits for the engine yields to a later one. */
+let navigations = 0;
+
 /**
  * Go to an address: the function containing it (or the hex view when no
  * function does). Pushes the previous location on the history stack.
@@ -381,6 +384,7 @@ export async function navigate(
 ): Promise<void> {
   const bid = state.bid;
   if (!bid) return;
+  const seq = ++navigations;
   const a = canon(addr);
   let fnId = opts.fnId ?? null;
   let view = opts.view ?? (state.loc?.view === 'hex' || state.loc?.view === 'types' ? 'linear' : (state.loc?.view ?? 'linear'));
@@ -394,6 +398,8 @@ export async function navigate(
       } catch {
         fnId = null;
       }
+      // Another navigation started while this one asked the engine: the later one wins.
+      if (seq !== navigations || state.bid !== bid) return;
     }
     // Outside every function: the whole-image listing shows it (the graph needs a function).
     if (!fnId && view === 'graph') view = 'linear';
@@ -432,6 +438,7 @@ export function setView(view: ViewMode): void {
 export function back(): void {
   const prev = state.history.at(-1);
   if (!prev) return;
+  navigations++;
   setState((s) => ({ loc: prev, history: s.history.slice(0, -1), future: s.loc ? [s.loc, ...s.future] : s.future, selection: null, linked: new Set() }));
   writeHash();
   void loadCurrent();
@@ -440,6 +447,7 @@ export function back(): void {
 export function forward(): void {
   const next = state.future[0];
   if (!next) return;
+  navigations++;
   setState((s) => ({ loc: next, future: s.future.slice(1), history: s.loc ? [...s.history, s.loc] : s.history, selection: null, linked: new Set() }));
   writeHash();
   void loadCurrent();

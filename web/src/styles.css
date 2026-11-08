@@ -1024,6 +1024,32 @@ select:focus {
 }
 
 /* ------------------------------------------------- data in/out, storage */
+.open-url {
+  margin-top: 10px;
+  display: flex;
+  gap: 8px;
+}
+.open-url-input {
+  flex: 1;
+  min-width: 0;
+  font-family: var(--mono);
+  padding: 5px 10px;
+}
+.open-url-confirm p {
+  margin: 6px 0;
+}
+.open-url-target {
+  display: block;
+  font-family: var(--mono);
+  background: var(--bg-3);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 6px 8px;
+  overflow-wrap: anywhere;
+}
+.open-url-confirm .modal-foot {
+  justify-content: flex-end;
+}
 .home-actions {
   margin-top: 10px;
   display: flex;

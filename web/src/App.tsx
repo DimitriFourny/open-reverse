@@ -1,5 +1,18 @@
 import { useEffect, useRef, useState } from 'react';
-import { ExportMenu, ImportArchiveButton, importArchive, isProjectArchive, RecentActions, StoragePanel, TaskDialog, UsageCell } from './components/DataTools.tsx';
+import {
+  askOpenUrl,
+  ExportMenu,
+  ImportArchiveButton,
+  importArchive,
+  isProjectArchive,
+  OpenUrlConfirm,
+  OpenUrlField,
+  RecentActions,
+  StoragePanel,
+  TaskDialog,
+  UsageCell,
+} from './components/DataTools.tsx';
+import { OPEN_PARAM } from './remote.ts';
 import { api } from './api.ts';
 import type { EngineMemory } from './engine/memory.ts';
 import { Dialogs } from './components/Dialogs.tsx';
@@ -157,6 +170,7 @@ function Home() {
         <div className="dropzone">
           Drop a binary or a project archive here or <FilePicker className="primary">Open file…</FilePicker>
         </div>
+        <OpenUrlField />
         <div className="home-actions">
           <ImportArchiveButton />
         </div>
@@ -529,6 +543,14 @@ export function App() {
       void refreshBinaries();
       const h = parseHash();
       if (h.bid) void openBinary(h.bid, { addr: h.addr, view: h.view });
+      // `?open=<URL>`: taken out of the page URL at once (a reload must not ask again), opened once confirmed.
+      const params = new URLSearchParams(location.search);
+      const url = params.get(OPEN_PARAM);
+      if (url !== null) {
+        params.delete(OPEN_PARAM);
+        history.replaceState(null, '', `${location.pathname}${params.size ? `?${params}` : ''}${location.hash}`);
+        askOpenUrl(url);
+      }
     })();
   }, []);
 
@@ -538,6 +560,7 @@ export function App() {
         <TopBar />
         <Home />
         <TaskDialog />
+        <OpenUrlConfirm />
         <StatusBar />
       </div>
     );
@@ -579,6 +602,7 @@ export function App() {
       )}
       <Dialogs />
       <TaskDialog />
+      <OpenUrlConfirm />
       <HighlightStyle />
       <StatusBar />
     </div>
