@@ -21,7 +21,7 @@ import {
   type XrefDirection,
 } from './api.ts';
 import { historyFor, type UndoEntry } from './undo.ts';
-import { canon } from './util.ts';
+import { canon, cIdentifier } from './util.ts';
 
 export type ViewMode = 'linear' | 'graph' | 'hex' | 'types';
 export type SidebarTab = 'functions' | 'strings' | 'symbols' | 'sections' | 'calls';
@@ -313,6 +313,15 @@ async function loadFunctions(): Promise<void> {
   for (const f of r.functions) {
     for (const n of [f.name, f.originalName]) if (n?.startsWith('_') && !byName.has(n.slice(1))) byName.set(n.slice(1), f);
   }
+  // The pseudocode spells a demangled name as a C identifier (`geom__area_int__int_`):
+  // map that spelling too, when only one function has it.
+  const spelled = new Map<string, FunctionSummary | null>();
+  for (const f of r.functions) {
+    if (!/[^A-Za-z0-9_]/.test(f.name)) continue;
+    const c = cIdentifier(f.name);
+    spelled.set(c, spelled.has(c) ? null : f);
+  }
+  for (const [c, f] of spelled) if (f && !byName.has(c)) byName.set(c, f);
   setState({
     functions: r.functions,
     byId: new Map(r.functions.map((f) => [f.id, f])),
@@ -700,7 +709,9 @@ export function beginRename(): void {
   }
   fn ??= loc?.fnId ? byId.get(loc.fnId) : undefined;
   if (!fn) return;
-  setState({ dialog: { kind: 'rename', target: { id: fn.id }, current: fn.name, what: `function at ${fn.entry}` } });
+  // A demangled name (`geom::area(int, int)`) is no valid new name: start from the mangled one, as IDA does.
+  const current = fn.mangled && !fn.renamed && !/^[A-Za-z_][A-Za-z0-9_:$.@]*$/.test(fn.name) ? fn.mangled : fn.name;
+  setState({ dialog: { kind: 'rename', target: { id: fn.id }, current, what: `function ${fn.name} at ${fn.entry}` } });
 }
 
 /**

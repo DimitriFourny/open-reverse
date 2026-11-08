@@ -1,7 +1,7 @@
 import { useVirtualizer } from '@tanstack/react-virtual';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { loadSidebar, navigate, setState, showXrefs, useStore, type SidebarTab } from '../store.ts';
-import { cmpAddr, padAddr } from '../util.ts';
+import { cmpAddr, mangledNote, padAddr } from '../util.ts';
 import { CallTree } from './CallTree.tsx';
 
 const ROW_H = 22;
@@ -85,7 +85,7 @@ export function Sidebar() {
         secondary: sort === 'size' ? String(fn.size) : padAddr(fn.entry),
         addr: fn.entry,
         cls: fn.importStub ? 'stub' : fn.renamed ? 'renamed' : fn.originalName ? '' : 'unnamed',
-        title: `${fn.name} @ ${fn.entry} · ${fn.size} bytes · ${fn.boundary}${fn.importStub ? ' · import stub' : ''}${fn.renamed ? ` · originally ${fn.originalName ?? 'unnamed'}` : ''}`,
+        title: `${fn.name} @ ${fn.entry} · ${fn.size} bytes · ${fn.boundary}${fn.importStub ? ' · import stub' : ''}${fn.renamed ? ` · originally ${fn.originalName ?? 'unnamed'}` : mangledNote(fn.mangled)}`,
         onOpen: () => void navigate(fn.entry, { fnId: fn.id }),
         onXrefs: () => void showXrefs({ id: fn.id }, fn.name),
       }));
@@ -104,13 +104,13 @@ export function Sidebar() {
         }));
     if (tab === 'symbols')
       return (symbols.data ?? [])
-        .filter((s) => s.name && (!f || s.name.toLowerCase().includes(f)))
+        .filter((s) => s.name && (!f || s.name.toLowerCase().includes(f) || s.mangled?.toLowerCase().includes(f)))
         .map((s) => ({
           key: s.id,
           primary: s.name,
           secondary: s.addr ? padAddr(s.addr) : s.kind,
           addr: s.addr,
-          title: `${s.name} · ${s.kind}${s.binding ? ` · ${s.binding}` : ''}${s.addr ? ` @ ${s.addr}` : ''}`,
+          title: `${s.name} · ${s.kind}${s.binding ? ` · ${s.binding}` : ''}${s.addr ? ` @ ${s.addr}` : ''}${mangledNote(s.mangled)}`,
           onOpen: () => {
             if (s.addr && s.addr !== '0x0') void navigate(s.addr);
           },

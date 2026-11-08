@@ -3,6 +3,7 @@
 import type { Instruction, Listing, OperandRef, ResolvedTarget } from '../api.ts';
 import { getState, navigate, setCursor, useStore } from '../store.ts';
 import { numberKey, operandTokens } from './tokens.ts';
+import { mangledNote } from '../util.ts';
 
 export interface ResolvedRef extends OperandRef {
   local: boolean;
@@ -65,7 +66,7 @@ export function Operands({ insn, local }: { insn: Instruction; local: Set<string
         key={key.n++}
         data-k={refKey(r)}
         className={`ref ref-${r.local ? 'code' : r.kind}${selected ? ' selected' : ''}`}
-        title={`${r.addr}${r.label ? ` ${r.label}` : ''} — double-click or Enter to follow`}
+        title={`${r.addr}${r.label ? ` ${r.label}` : ''}${r.kind === 'function' ? mangledNote(getState().byEntry.get(r.addr)?.mangled) : ''} — double-click or Enter to follow`}
         onClick={(e) => {
           e.stopPropagation();
           setCursor(insn.addr, { kind: 'addr', addr: r.addr });
@@ -163,7 +164,7 @@ export function AutoComment({ insn }: { insn: Instruction }) {
             <span
               className={`ref ref-${t.kind === 'import' ? 'function' : t.kind}${selected ? ' selected' : ''}`}
               data-k={t.kind === 'string' ? undefined : `n:${BigInt(t.addr).toString(16)}`}
-              title={`${t.addr}${t.label ? ` ${t.label}` : ''} (${t.access}) — X: xrefs · double-click or Enter: follow`}
+              title={`${t.addr}${t.label ? ` ${t.label}` : ''} (${t.access})${t.kind === 'function' || t.kind === 'import' ? mangledNote((getState().byEntry.get(t.addr) ?? getState().byName.get(t.label))?.mangled) : ''} — X: xrefs · double-click or Enter: follow`}
               onClick={(e) => {
                 e.stopPropagation();
                 setCursor(insn.addr, { kind: 'addr', addr: t.addr });

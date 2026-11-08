@@ -6,10 +6,13 @@ import type { QueryService } from '@od/service/queries/index.js';
 import { entityIdentity, typeLibraryIdentity, userTypeIdentity } from '@od/core/identity.js';
 import { encodeTypeDefinition } from '@od/core/serialization.js';
 import { parseCDeclarations } from '@od/metadata/c-declarations/index.js';
+import { demangleName } from '@od/metadata/symbols/index.js';
 import { canon, operandConstants } from './hex.ts';
 import { compilePrototype, compileType, PrototypeError, type TypeDefinition, type TypeIds } from './prototype.ts';
 import { declaredMembers, normalizeType, recoveredDeclaration, structLayout } from './structs.ts';
 import { createHash } from './shims/crypto.ts';
+import { buildNavMap, runSearch, SearchError, type NavKind, type NavMap, type Region, type SearchQuery, type SearchResult } from './search.ts';
+import type { TaskContext } from './tasks.ts';
 import type { BinaryRecord, Workspace } from './workspace.ts';
 
 /** The largest budget OpenDecomp accepts: discovery of a real binary needs it. */
@@ -21,6 +24,18 @@ const DISCOVERY_BUDGET = {
   deadline_ms: 300_000,
 } as const;
 const MAX_LIST_ITEMS = 200_000;
+
+function hexBytes(hex: string): Uint8Array {
+  const out = new Uint8Array(hex.length >> 1);
+  for (let i = 0; i < out.length; i++) out[i] = parseInt(hex.substr(i * 2, 2), 16);
+  return out;
+}
+
+function cmpBig(a: string, b: string): number {
+  const x = BigInt(a);
+  const y = BigInt(b);
+  return x < y ? -1 : x > y ? 1 : 0;
+}
 
 export class ApiError extends Error {
   readonly status: number;
@@ -48,6 +63,8 @@ export interface FunctionSummary {
   id: string;
   name: string;
   originalName: string | null;
+  /** The original (linkage) name when it is a mangled name OpenDecomp demangles for display. */
+  mangled: string | null;
   renamed: boolean;
   entry: string;
   size: number;
@@ -336,11 +353,14 @@ export class AnalysisSession {
       for (const fn of data.items) {
         const entry = canon(fn.entry.value);
         const size = fn.ranges.reduce((n, r) => n + Number(BigInt(r.size)), 0);
+        // OpenDecomp shows a mangled name demangled: that is not a rename.
+        const demangled = fn.original_name ? await this.#demangled(fn.original_name) : null;
         list.push({
           id: fn.id,
-          name: fn.display_name ?? fn.original_name ?? `sub_${entry.slice(2)}`,
+          name: fn.display_name ?? demangled ?? fn.original_name ?? `sub_${entry.slice(2)}`,
           originalName: fn.original_name,
-          renamed: fn.display_name !== null && fn.display_name !== fn.original_name,
+          mangled: demangled ? fn.original_name : null,
+          renamed: fn.display_name !== null && fn.display_name !== fn.original_name && fn.display_name !== demangled,
           entry,
           size,
           boundary: fn.boundary,
@@ -360,6 +380,20 @@ export class AnalysisSession {
     };
     this.#functions = index;
     return index;
+  }
+
+  readonly #demangledNames = new Map<string, string | null>();
+
+  /** OpenDecomp's display demangling of a linkage name (C++ Itanium / MSVC, Swift), or null. */
+  async #demangled(name: string): Promise<string | null> {
+    if (!/^_{0,2}Z|^_?\?|^_?\$[sS]|^_?_T/.test(name)) return null;
+    let d = this.#demangledNames.get(name);
+    if (d === undefined) {
+      const r = await demangleName(name, this.binary.image.target.format, { checkpoint: () => undefined } as unknown as Parameters<typeof demangleName>[2]);
+      d = r.display_name;
+      this.#demangledNames.set(name, d);
+    }
+    return d;
   }
 
   async functionById(id: string): Promise<FunctionSummary> {
@@ -544,7 +578,7 @@ export class AnalysisSession {
 
   async symbols() {
     type Item = { kind: string; symbol?: { id: string; display_name: string | null; original_name: string | null; kind: string; address: { value: string } | null; size: string | null; binding?: string } };
-    const out: { id: string; name: string; kind: string; addr: string | null; size: number; binding: string | null }[] = [];
+    const out: { id: string; name: string; mangled: string | null; kind: string; addr: string | null; size: number; binding: string | null }[] = [];
     let cursor: string | undefined;
     do {
       const data = need(
@@ -556,6 +590,8 @@ export class AnalysisSession {
         out.push({
           id: s.id,
           name: s.display_name ?? s.original_name ?? '',
+          // Shown demangled: the linkage name stays available (tooltips, filtering).
+          mangled: s.display_name && s.original_name && s.display_name !== s.original_name ? s.original_name : null,
           kind: s.kind,
           addr: s.address ? canon(s.address.value) : null,
           size: s.size ? Number(BigInt(s.size)) : 0,
@@ -912,6 +948,134 @@ export class AnalysisSession {
     const incoming = await this.xrefs({ id: functionId }, 'incoming');
     const outgoing = await this.xrefs({ id: functionId }, 'outgoing');
     return { callers: callNodes(incoming, (x) => x.fromFunction, null), callees: callNodes(outgoing, (x) => x.toFunction, (x) => x.toName) };
+  }
+
+  // ------------------------------------------------- search and navigation map
+
+  #regions: Promise<Region[]> | null = null;
+
+  /** The image's sections mapped in VA space (else its mappings): what search reads and the strip shows. */
+  regions(): Promise<Region[]> {
+    this.#regions ??= (async () => {
+      type Row = {
+        name: string;
+        kind: string;
+        virtual_range: { start: { space: string; value: string }; size: string } | null;
+        file_range: { size: string } | null;
+        permissions: string[];
+        flags?: string;
+      };
+      const macho = this.binary.image.target.format === 'macho';
+      const rows = (await this.#binaryInfoList('sections')) as Row[];
+      const sections: Region[] = rows
+        .filter((r) => r.kind === 'section' && r.virtual_range?.start.space === 'va' && BigInt(r.virtual_range.size) > 0n)
+        .map((r) => {
+          const size = Number(BigInt(r.virtual_range!.size));
+          return {
+            name: r.name,
+            start: BigInt(r.virtual_range!.start.value),
+            size,
+            fileSize: r.file_range ? Math.min(size, Number(BigInt(r.file_range.size))) : 0,
+            // Mach-O sections carry their segment's permissions: __TEXT,__const is not code.
+            exec: macho ? (Number(r.flags ?? 0) & 0x80000400) !== 0 : r.permissions.includes('execute'),
+          };
+        });
+      if (sections.length) return sections;
+      return (await this.#loadMappings())
+        .filter((m) => m.perms.length > 0 && m.memSize > 0n)
+        .map((m) => ({
+          name: canon(m.va),
+          start: m.va,
+          size: Number(m.memSize),
+          fileSize: Number(m.fileSize < m.memSize ? m.fileSize : m.memSize),
+          exec: m.perms.includes('execute'),
+        }));
+    })();
+    this.#regions.catch(() => (this.#regions = null));
+    return this.#regions;
+  }
+
+  /** Bytes at an address as contiguous runs (unmapped holes left out); at most 64 KiB. */
+  async readBytes(addr: bigint, length: number): Promise<{ start: bigint; bytes: Uint8Array }[]> {
+    const mem = await this.memory(canon(addr), length);
+    return mem.segments.flatMap((s) => (s.hex ? [{ start: BigInt(s.start), bytes: hexBytes(s.hex) }] : []));
+  }
+
+  /** Per-function instruction text for the immediate search, at one revision (capped). */
+  #insnText: { revision: number; byFunction: Map<string, { addr: string; mnemonic: string; operands: string }[]>; units: number } | null = null;
+
+  async instructionText(functionId: string) {
+    const revision = this.binary.revision;
+    if (this.#insnText?.revision !== revision) this.#insnText = { revision, byFunction: new Map(), units: 0 };
+    const cache = this.#insnText;
+    const hit = cache.byFunction.get(functionId);
+    if (hit) return hit;
+    type Compact = { address: { value: string }; presentation: { mnemonic: string; operands: string } | null };
+    const out: { addr: string; mnemonic: string; operands: string }[] = [];
+    let cursor: string | undefined;
+    do {
+      const data = need(
+        await this.binary.getFunction(functionId, { view: 'disassembly', detail: 'compact', page: { limit: 1000, ...(cursor ? { cursor } : {}) } }),
+      ) as { items: Compact[]; page: { next_cursor: string | null } };
+      for (const i of data.items)
+        if (i.presentation) out.push({ addr: canon(i.address.value), mnemonic: i.presentation.mnemonic, operands: i.presentation.operands });
+      cursor = data.page.next_cursor ?? undefined;
+    } while (cursor);
+    // A second search of the same revision skips OpenDecomp; ~2M instructions at most are kept.
+    if (cache.units + out.length <= 2_000_000) {
+      cache.byFunction.set(functionId, out);
+      cache.units += out.length;
+    }
+    return out;
+  }
+
+  /** Binary search (bytes, text) or operand value search (every function's disassembly). */
+  async search(query: SearchQuery, ctx: TaskContext): Promise<SearchResult> {
+    try {
+      return await runSearch(
+        {
+          regions: () => this.regions(),
+          read: (addr, length) => this.readBytes(addr, length),
+          functions: async () =>
+            [...(await this.functions()).list].sort((a, b) => cmpBig(a.entry, b.entry)).map((f) => ({ id: f.id, name: f.name, entry: f.entry })),
+          instructions: (id) => this.instructionText(id),
+        },
+        query,
+        ctx,
+      );
+    } catch (error) {
+      if (error instanceof SearchError) throw new ApiError(400, error.message);
+      throw error;
+    }
+  }
+
+  #navMap: { revision: number; value: Promise<NavMap> } | null = null;
+
+  /** The navigation strip's map (functions, strings, data symbols over the mapped sections), per revision. */
+  navMap(): Promise<NavMap> {
+    const revision = this.binary.revision;
+    if (this.#navMap?.revision === revision) return this.#navMap.value;
+    const value = (async () => {
+      const [regions, index, strings, symbols] = await Promise.all([
+        this.regions(),
+        this.functions(),
+        this.#loadStrings(),
+        this.symbols().catch(() => []),
+      ]);
+      const items: { start: bigint; size: number; kind: NavKind }[] = [];
+      for (const s of symbols)
+        if (s.kind === 'object' && s.addr && !index.byEntry.has(s.addr)) items.push({ start: BigInt(s.addr), size: s.size || 1, kind: 'data' });
+      const utf8 = new TextEncoder();
+      for (const [addr, s] of strings)
+        items.push({ start: BigInt(addr), size: /16/.test(s.encoding) ? 2 * (s.text.length + 1) : utf8.encode(s.text).length + 1, kind: 'string' });
+      for (const f of index.list) items.push({ start: BigInt(f.entry), size: f.size, kind: f.importStub ? 'import' : 'code' });
+      return buildNavMap(regions, items);
+    })();
+    this.#navMap = { revision, value };
+    value.catch(() => {
+      if (this.#navMap?.value === value) this.#navMap = null;
+    });
+    return value;
   }
 
   // ------------------------------------------------------------- annotations

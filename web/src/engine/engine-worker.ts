@@ -125,9 +125,9 @@ adopt(async (event: MessageEvent<RpcMessage>) => {
       const ctx: TaskContext = {
         signal: abort.signal,
         progress: (progress) => {
-          // At most ~20 reports a second, but always the last of a phase.
+          // At most ~20 reports a second, but always the last of a phase and every one carrying results.
           const now = Date.now();
-          if (now - last < 50 && progress.done !== progress.total) return;
+          if (now - last < 50 && progress.done !== progress.total && !progress.items?.length) return;
           last = now;
           post({ event: 'progress', id, progress });
         },

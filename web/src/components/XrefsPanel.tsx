@@ -1,6 +1,6 @@
 import type { Xref } from '../api.ts';
 import { navigate, setState, setXrefsDirection, useStore, xrefsTitle } from '../store.ts';
-import { padAddr } from '../util.ts';
+import { mangledNote, padAddr } from '../util.ts';
 
 /** `name+0x10`, or the bare name at the function's entry. */
 function within(addr: string | null, fn: Xref['fromFunction']): string {
@@ -10,6 +10,8 @@ function within(addr: string | null, fn: Xref['fromFunction']): string {
 
 export function XrefsPanel() {
   const xrefs = useStore((s) => s.xrefs);
+  const byId = useStore((s) => s.byId);
+  const byName = useStore((s) => s.byName);
   if (!xrefs) return null;
   const outgoing = xrefs.direction === 'outgoing';
   return (
@@ -55,9 +57,9 @@ export function XrefsPanel() {
                   }}
                 >
                   <td className="addr">{x.from ? padAddr(x.from) : '?'}</td>
-                  <td>{within(x.from, x.fromFunction)}</td>
+                  <td title={x.fromFunction ? `${x.fromFunction.name}${mangledNote(byId.get(x.fromFunction.id)?.mangled)}` : undefined}>{within(x.from, x.fromFunction)}</td>
                   {outgoing && (
-                    <td>
+                    <td title={x.toName ? `${x.toName}${mangledNote((x.toFunction ? byId.get(x.toFunction.id) : byName.get(x.toName))?.mangled)}` : undefined}>
                       {x.toName ?? (x.to ? '' : '?')}
                       {x.to && <span className="addr"> {x.toName ? `(${x.to})` : padAddr(x.to)}</span>}
                     </td>

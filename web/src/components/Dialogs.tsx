@@ -13,7 +13,7 @@ import {
   useStore,
   type Dialog,
 } from '../store.ts';
-import { cmpAddr, functionOffset, padAddr, parseAddress } from '../util.ts';
+import { cmpAddr, functionOffset, mangledNote, padAddr, parseAddress } from '../util.ts';
 
 function Modal({ title, children, onClose }: { title: string; children: React.ReactNode; onClose: () => void }) {
   return (
@@ -38,10 +38,13 @@ function GotoDialog() {
     const t = text.trim().toLowerCase();
     if (!t) return functions.slice(0, 50);
     const scored: [number, (typeof functions)[number]][] = [];
+    // Demangled and mangled names both match (`geom::area`, `_ZN4geom4areaEii`).
     for (const f of functions) {
       const n = f.name.toLowerCase();
       const i = n.indexOf(t);
+      const m = f.mangled?.toLowerCase().indexOf(t) ?? -1;
       if (i >= 0) scored.push([(i === 0 ? 0 : 1000) + n.length, f]);
+      else if (m >= 0) scored.push([(m === 0 ? 500 : 1500) + f.mangled!.length, f]);
       else if (f.entry.includes(t)) scored.push([2000, f]);
     }
     return scored.sort((a, b) => a[0] - b[0]).slice(0, 50).map(([, f]) => f);
@@ -49,7 +52,8 @@ function GotoDialog() {
   const addr = parseAddress(text);
   const go = (i: number) => {
     const f = matches[i];
-    if (f && (!addr || f.name.toLowerCase() === text.trim().toLowerCase())) {
+    const exact = (x: (typeof matches)[number]) => [x.name, x.mangled].some((n) => n?.toLowerCase() === text.trim().toLowerCase());
+    if (f && (!addr || exact(f))) {
       close();
       void navigate(f.entry, { fnId: f.id });
     } else if (addr) {
@@ -72,14 +76,23 @@ function GotoDialog() {
         onKeyDown={(e) => {
           if (e.key === 'ArrowDown') (e.preventDefault(), setSel((s) => Math.min(s + 1, matches.length - 1)));
           else if (e.key === 'ArrowUp') (e.preventDefault(), setSel((s) => Math.max(s - 1, 0)));
-          else if (e.key === 'Enter') go(addr && !matches.some((m) => m.name.toLowerCase() === text.trim().toLowerCase()) ? -1 : sel);
+          else if (e.key === 'Enter') go(addr && !matches.some((m) => [m.name, m.mangled].some((n) => n?.toLowerCase() === text.trim().toLowerCase())) ? -1 : sel);
         }}
       />
       {addr && <div className="goto-hint dim">Enter: go to address {addr}</div>}
       <div className="goto-list">
         {matches.map((f, i) => (
-          <div key={f.id} className={`goto-item${i === sel ? ' active' : ''}`} onMouseEnter={() => setSel(i)} onClick={() => go(i)}>
-            <span>{f.name}</span>
+          <div
+            key={f.id}
+            className={`goto-item${i === sel ? ' active' : ''}`}
+            onMouseEnter={() => setSel(i)}
+            onClick={() => go(i)}
+            title={`${f.name}${mangledNote(f.mangled)}`}
+          >
+            <span className="goto-name">
+              {f.name}
+              {f.mangled && text.trim() && !f.name.toLowerCase().includes(text.trim().toLowerCase()) && <span className="dim"> {f.mangled}</span>}
+            </span>
             <span className="dim">{padAddr(f.entry)}</span>
           </div>
         ))}
