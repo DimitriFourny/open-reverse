@@ -13,7 +13,13 @@ OpenDecomp loads, disassembles and decompiles the binary, and OpenReverse runs i
 - **Pseudo-C / pseudo-Python** next to the disassembly, linked in both directions. Click a statement to highlight its instructions; move the cursor in the disassembly to highlight the statements it produced. This uses OpenDecomp's emission mappings. Language, `proven`/`likely` inference and `source`/`checked` view are selectable.
 - **Navigation**: double-click to follow references, back/forward history, go to an address or function name with fuzzy matching, and the location kept in the URL hash so a reload keeps your place.
 - **Function, string, symbol and section lists**, all filterable and virtualized so they stay fast on large binaries.
-- **Cross-references** to functions, strings and data.
+- **Cross-references** to functions, strings and data (`X`), and **from** a function or instruction (`Shift+X`): what it calls, jumps to, reads and writes. A To / From toggle in the xrefs panel switches direction for the same target; a row goes to the referencing site (to) or the target (from).
+- **Call tree** (the sidebar's **Calls** tab): the current function's direct callers and callees, from OpenDecomp's established `call` references. Each node expands lazily to its own callers (or callees), recursion is marked `↻`, a click goes to the function and a right-click shows its xrefs. Results are cached per project revision, and the tree reloads its open levels after an edit.
+- **Bookmarks** (`Alt+M`, `Ctrl+M`, like IDA's mark position / jump to marked position): bookmark the cursor's address with an optional description, then list, filter, jump to or delete bookmarks. They are stored per binary next to the comments and travel in project archives.
+- **Undo / redo** (`Ctrl+Z`, `Ctrl+Shift+Z` or `Ctrl+Y`) of every edit: function, global, parameter and local renames, comments, signatures, type-library declarations and deletions, and bookmarks. Each step goes through the same OpenDecomp annotation calls as the edit itself, so pseudocode, lists and callers refresh as after any edit, and a toast says what was undone. The history is per binary and kept in memory (it does not survive a reload). How each edit is restored:
+  - function renames and signatures: this app's annotations on the function (name, signature and the types it declares) are put back exactly as they were stored;
+  - parameters and locals: the name shown before the rename is set again (a generated name such as `arg0` comes back as a name annotation with the same text); globals: the name this tab last gave the address, else the original name, since OpenDecomp has no read of a single global's annotation;
+  - type declarations: each redeclared name gets its previous declaration back and new names are removed (their `Name*` helper types stay, as with Delete); a deleted declaration is declared again from its C text, so it keeps its type ID and signatures using it bind again.
 - **Hex view** of the section around the cursor.
 - **Types view**: an editor for the image's **type library**. Write C declarations (struct, union, enum, typedef, `<stdint.h>` names, pointers, arrays, packed) and apply them with OpenDecomp's `types_declare`; parse errors are shown inline with line and column. The library's declarations can be loaded back into the editor or deleted. Below it are the image-wide merged structure types OpenDecomp recovered (`struct_<hex>`, or the declared structure once a signature binds it).
 - **Function signatures** (`Y`, like IDA): edit the function's C prototype, e.g. `int parse(struct Node *n, char *s)`. It is stored as an asserted `signature` annotation: the function and its callers are re-decompiled with the declared types and parameter names. Named types come from the type library; builtins and pointers are declared next to the signature. Changing the name in the prototype renames the function; Reset removes the signature. OpenDecomp applies a declared signature only where its reconstruction confirms it and when type recovery is complete; a toast says when it did not (for example on ELF images, whose type recovery stays partial because OpenDecomp has no ELF DWARF reader).
@@ -48,27 +54,30 @@ Everything lives in the browser's IndexedDB. The home screen shows what each bin
 
 - **⬇** downloads the original binary.
 - **Export** saves a project archive (below).
-- **Reset** deletes the binary's OpenDecomp project directory and keeps the binary and comments. OpenDecomp stores renames as annotations in the same `project.sqlite` as its analysis cache, and has no supported way to drop cached artifacts on their own (they are indexed by rows in that database and referenced by annotation catalogs; it never prunes them), so a reset also loses renames. Export an archive first if you want to keep them.
+- **Reset** deletes the binary's OpenDecomp project directory and keeps the binary, comments and bookmarks. OpenDecomp stores renames as annotations in the same `project.sqlite` as its analysis cache, and has no supported way to drop cached artifacts on their own (they are indexed by rows in that database and referenced by annotation catalogs; it never prunes them), so a reset also loses renames. Export an archive first if you want to keep them.
 
 With a binary open, **Export ▾** in the top bar offers:
 
 - **All pseudocode (.zip)**: OpenDecomp's own `export` (the code of `open-decomp export`, run in the worker) in the current dialect and inference: `functions/NAME@0xADDR.c` (or `.py`; `.asm` where no pseudocode could be produced), `types.h` (the image's merged types plus the structures the functions use, `structures: 'external'`), `index.tsv`, `strings.tsv`, `imports.tsv`, `exports.tsv` and `README.txt`, in one top-level folder. Progress is reported per function and it can be cancelled. Decompiling takes up to seconds per function, and the other views wait for the function being decompiled.
 - **Project archive** and **Original binary**, as on the home screen.
 
-### Project archive format (`<name>.orproj.zip`, version 1)
+### Project archive format (`<name>.orproj.zip`, versions 1 and 2)
 
 A standard ZIP file (stored or deflated entries, no ZIP64, so under 4 GiB) that any unzip tool can open:
 
 | Entry                | Contents |
 | -------------------- | -------- |
-| `open-reverse.json`  | Manifest: `{ "format": "open-reverse-project", "version": 1, "generator", "createdAt", "record": { "id", "name", "sha256", "size", "addedAt" } }` |
+| `open-reverse.json`  | Manifest: `{ "format": "open-reverse-project", "version", "generator", "createdAt", "record": { "id", "name", "sha256", "size", "addedAt" } }` |
 | `binary/<name>`      | The binary. Its SHA-256 is `record.sha256` and `record.id` is the first 16 hex digits. |
 | `comments.json`      | `{ "<0xaddress>": "comment" }` |
+| `bookmarks.json`     | `{ "<0xaddress>": "description" }` (version 2; present only when there are bookmarks) |
 | `project/<path>`     | The OpenDecomp cache root of the binary: `<sha256>.default/project.sqlite` (analysis cache, annotations such as renames), `images/`, `artifacts/`. |
+
+An archive says version 2 only when it holds bookmarks, the one entry version 1 lacks: an archive without bookmarks is still version 1 and opens in older OpenReverse builds (which refuse entries they do not know). Version 1 archives import as before, without bookmarks.
 
 The export works while the binary is open: the live in-memory SQLite database is serialized when no transaction is open, in the same synchronous step that copies the other files, so the database and the artifact files agree.
 
-Import (the **Import project archive…** button, or drop a `.orproj.zip` on the home screen) validates the whole archive before writing anything: the format and version (a newer version is refused), the record, the binary's SHA-256, the comments, CRC-32 and declared sizes of every entry (inflation is capped while streaming), size limits (2 GiB archive, 1 GiB per entry, 2 GiB in total), and paths: only the entries above, with no absolute, `..`, empty, backslash, colon or control-character segments, so files can only land in `/workspace/binaries/<id>/project/`. A binary that is already in the workspace (same SHA-256) is a conflict: you are asked whether to replace it, and nothing changes if you decline. Decompilations cached in the archive are served from the cache after import.
+Import (the **Import project archive…** button, or drop a `.orproj.zip` on the home screen) validates the whole archive before writing anything: the format and version (a newer version is refused), the record, the binary's SHA-256, the comments and bookmarks, CRC-32 and declared sizes of every entry (inflation is capped while streaming), size limits (2 GiB archive, 1 GiB per entry, 2 GiB in total), and paths: only the entries above, with no absolute, `..`, empty, backslash, colon or control-character segments, so files can only land in `/workspace/binaries/<id>/project/`. A binary that is already in the workspace (same SHA-256) is a conflict: you are asked whether to replace it, and nothing changes if you decline. Decompilations cached in the archive are served from the cache after import.
 
 ## Requirements (to build)
 
@@ -96,6 +105,11 @@ npm run preview        # serve web/dist locally
 | `N`                | Rename the selected function, call target, global, parameter or local |
 | `Y`                | Edit the C prototype of the selected call target (or current function) |
 | `X`                | Cross-references to the selection (or current function) |
+| `Shift+X`          | Cross-references from the selection, the cursor's instruction, or the current function |
+| `Ctrl+Z`           | Undo the last edit (rename, comment, signature, type declaration, bookmark) |
+| `Ctrl+Shift+Z`, `Ctrl+Y` | Redo                                        |
+| `Alt+M`            | Bookmark the cursor's address (again: edit or remove it) |
+| `Ctrl+M`           | List bookmarks: filter, `Enter` jumps, `Delete` removes |
 | `;`                | Comment at the cursor                             |
 | `↑` `↓`            | Previous / next instruction (in the graph, across to the fall-through block) |
 | `PgUp` `PgDn`, `Home` `End` | Page up / down (linear), first / last instruction |
@@ -115,13 +129,14 @@ npm run preview        # serve web/dist locally
 ```
 web/src/
   App.tsx, components/, views/   React UI (linear, graph, pseudocode, hex, types)
-  store.ts                       App state, navigation history, caches
+  store.ts                       App state, navigation history, caches, edits and their undo entries
+  undo.ts                        Undo/redo history (per binary, in memory)
   api.ts                         Typed RPC client to the engine worker
   engine/
     worker.ts                    Worker entry: boots WASM + SQLite, serves RPC
     engine.ts, session.ts        Per-binary OpenDecomp session and presentation
     prototype.ts                 C prototype -> OpenDecomp signature (via its C declaration parser)
-    workspace.ts, vfs.ts         Binaries/projects in a VFS persisted to IndexedDB
+    workspace.ts, vfs.ts         Binaries/projects (and comments, bookmarks) in a VFS persisted to IndexedDB
     archive.ts, zip.ts           Project archive format and the ZIP container
     transfer.ts, tasks.ts        Archive snapshots, pseudocode export, storage use; progress/cancel of long calls
     shims/                       Browser implementations of the Node built-ins
@@ -132,10 +147,11 @@ vendor/open-decomp               OpenDecomp (git submodule, unmodified)
 
 ## Tests
 
-- `npm test` runs unit tests under Node: the shims (VFS/fs, SQLite, crypto, zstd, v8), the ZIP/project archive encoder and validator, the token keys used for highlighting, and the C prototype compiler (with OpenDecomp's declaration parser).
+- `npm test` runs unit tests under Node: the shims (VFS/fs, SQLite, crypto, zstd, v8), the ZIP/project archive encoder and validator (including bookmarks and versions), the token keys used for highlighting, the C prototype compiler (with OpenDecomp's declaration parser), and the undo/redo history.
 - `npm run test:e2e` drives the built site in Chromium. Start the site first with `npm run preview -- --port 5199`, and install the browser with `npm i -D playwright && npx playwright install chromium` (or point `PLAYWRIGHT_PATH` at a playwright package installed elsewhere). It covers:
   - upload, decompilation, renames propagating to callers, comments and persistence across a reload;
   - parameter/local renames, type declarations, and signatures propagating to callers;
   - branch arrows, keyboard navigation, token highlighting, find, the graph minimap, and the graph, hex and xrefs views;
+  - undo/redo of renames, comments, a local rename, a signature and a type redeclaration; xrefs from and the To/From toggle; the call tree; bookmarks (list, jump, delete, in the archive and after import);
   - Mach-O and PE, and a stripped binary with background discovery;
   - data in and out: pseudocode export (and cancel), archive export, binary download, an import conflict, and an archive imported into a fresh browser profile keeping the rename, the comment and the cached decompilation, then a project reset.

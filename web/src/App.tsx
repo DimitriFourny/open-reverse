@@ -6,6 +6,7 @@ import { Sidebar } from './components/Sidebar.tsx';
 import { XrefsPanel } from './components/XrefsPanel.tsx';
 import {
   back,
+  beginBookmark,
   beginComment,
   beginRename,
   beginSignature,
@@ -16,12 +17,14 @@ import {
   getState,
   openBinary,
   parseHash,
+  redo,
   refreshBinaries,
   setOptions,
   setState,
   setView,
   togglePseudo,
   toast,
+  undo,
   uploadAndOpen,
   useStore,
   type ViewMode,
@@ -41,7 +44,14 @@ function useKeyboard() {
       if (s.dialog || isEditableTarget(e.target) || !s.bid) return;
       const k = e.key;
       const plain = !e.ctrlKey && !e.metaKey && !e.altKey;
-      if ((e.ctrlKey || e.metaKey) && (k === 'p' || k === 'k')) {
+      const ctrl = (e.ctrlKey || e.metaKey) && !e.altKey;
+      const lower = k.toLowerCase();
+      if (ctrl && lower === 'z') void (e.shiftKey ? redo() : undo());
+      else if (ctrl && lower === 'y' && !e.shiftKey) void redo();
+      else if (ctrl && lower === 'm' && !e.shiftKey) setState({ dialog: { kind: 'bookmarks' } });
+      // Alt+M types "µ" on macOS: match the physical key too.
+      else if (e.altKey && !e.ctrlKey && !e.metaKey && (lower === 'm' || e.code === 'KeyM')) beginBookmark();
+      else if ((e.ctrlKey || e.metaKey) && (k === 'p' || k === 'k')) {
         e.preventDefault();
         setState({ dialog: { kind: 'goto' } });
       } else if ((e.ctrlKey || e.metaKey) && k === 'f') {
@@ -55,6 +65,7 @@ function useKeyboard() {
       else if (!plain) return;
       else if (k === 'g' || k === 'G') setState({ dialog: { kind: 'goto' } });
       else if (k === 'n' || k === 'N') beginRename();
+      else if (k === 'X' && e.shiftKey) beginXrefs('outgoing');
       else if (k === 'x' || k === 'X') beginXrefs();
       else if (k === 'y' || k === 'Y') void beginSignature();
       else if (k === ';' || k === '/') beginComment();
@@ -309,7 +320,7 @@ function StatusBar() {
       )}
       {showToast && <span className={`toast toast-${toast.kind}`}>{toast.text}</span>}
       <span className="spacer" />
-      <span className="dim keys">G go · ↑↓ move · Enter follow · Ctrl+F find · N rename · Y signature · X xrefs · ; comment · Space graph · Tab pseudo · H hex · B bytes · Esc back</span>
+      <span className="dim keys">G go · ↑↓ move · Enter follow · Ctrl+F find · N rename · Y signature · X xrefs · Shift+X xrefs from · ; comment · Ctrl+Z undo · Alt+M mark · Ctrl+M marks · Space graph · Tab pseudo · H hex · B bytes · Esc back</span>
     </div>
   );
 }

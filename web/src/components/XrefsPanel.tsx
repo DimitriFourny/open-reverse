@@ -1,13 +1,29 @@
-import { navigate, setState, useStore } from '../store.ts';
+import type { Xref } from '../api.ts';
+import { navigate, setState, setXrefsDirection, useStore, xrefsTitle } from '../store.ts';
 import { padAddr } from '../util.ts';
+
+/** `name+0x10`, or the bare name at the function's entry. */
+function within(addr: string | null, fn: Xref['fromFunction']): string {
+  if (!fn) return '—';
+  return `${fn.name}${addr && addr !== fn.entry ? `+0x${(BigInt(addr) - BigInt(fn.entry)).toString(16)}` : ''}`;
+}
 
 export function XrefsPanel() {
   const xrefs = useStore((s) => s.xrefs);
   if (!xrefs) return null;
+  const outgoing = xrefs.direction === 'outgoing';
   return (
     <div className="bottom-panel">
       <div className="panel-head">
-        <span>{xrefs.title}</span>
+        <span className="seg xref-dir">
+          <button className={outgoing ? '' : 'active'} onClick={() => setXrefsDirection('incoming')} title="References to the target (X)">
+            To
+          </button>
+          <button className={outgoing ? 'active' : ''} onClick={() => setXrefsDirection('outgoing')} title="References the target makes (Shift+X)">
+            From
+          </button>
+        </span>
+        <span>{xrefsTitle(xrefs.name, xrefs.direction)}</span>
         <span className="dim">{xrefs.status === 'ready' ? ` · ${xrefs.items.length} reference${xrefs.items.length === 1 ? '' : 's'}` : ''}</span>
         <button className="close" onClick={() => setState({ xrefs: null })} title="Close">×</button>
       </div>
@@ -20,7 +36,8 @@ export function XrefsPanel() {
             <thead>
               <tr>
                 <th>From</th>
-                <th>Function</th>
+                <th>{outgoing ? 'At' : 'Function'}</th>
+                {outgoing && <th>To</th>}
                 <th>Kind</th>
                 <th>Status</th>
               </tr>
@@ -29,12 +46,22 @@ export function XrefsPanel() {
               {xrefs.items.map((x, i) => (
                 <tr
                   key={i}
+                  title={outgoing ? (x.to ? `Go to ${x.to}` : 'Target known only by name') : x.from ? `Go to ${x.from}` : ''}
                   onClick={() => {
-                    if (x.from) void navigate(x.from, x.fromFunction ? { fnId: x.fromFunction.id } : {});
+                    if (outgoing) {
+                      const to = x.toFunction?.entry ?? x.to;
+                      if (to) void navigate(to, x.toFunction ? { fnId: x.toFunction.id } : {});
+                    } else if (x.from) void navigate(x.from, x.fromFunction ? { fnId: x.fromFunction.id } : {});
                   }}
                 >
                   <td className="addr">{x.from ? padAddr(x.from) : '?'}</td>
-                  <td>{x.fromFunction ? `${x.fromFunction.name}${x.from && x.from !== x.fromFunction.entry ? `+0x${(BigInt(x.from) - BigInt(x.fromFunction.entry)).toString(16)}` : ''}` : '—'}</td>
+                  <td>{within(x.from, x.fromFunction)}</td>
+                  {outgoing && (
+                    <td>
+                      {x.toName ?? (x.to ? '' : '?')}
+                      {x.to && <span className="addr"> {x.toName ? `(${x.to})` : padAddr(x.to)}</span>}
+                    </td>
+                  )}
                   <td>
                     <span className={`kind kind-${x.kind}`}>{x.kind}</span>
                   </td>

@@ -133,6 +133,10 @@ function errorMessages(result: unknown): string {
 
 const AUTHOR = 'open-reverse';
 
+type StoredAnnotation = { id: string; entity_id: string; status: string; value: { kind: string } };
+/** Annotations on one function, in the wire form `annotations_apply` takes back. */
+export type AnnotationSnapshot = { id: string; value: unknown; status: string }[];
+
 /**
  * Shared/exclusive gate. Decompiles run concurrently in request workers (shared); an
  * image-wide analysis in the project owner (binary_info `types`) publishes the same
@@ -176,6 +180,40 @@ function k_rev(key: string): number {
 
 function annotationId(key: string): string {
   return `annotation_${createHash('sha256').update(key).digest('hex')}`;
+}
+
+/** One caller or callee in the call tree: a function (id set) or an import known only by name. */
+export interface CallNode {
+  id: string | null;
+  name: string;
+  entry: string | null;
+  /** Call sites: in the caller (callers) or in this function (callees). */
+  sites: number;
+}
+
+type BriefFunction = { id: string; name: string; entry: string } | null;
+
+/** Groups established call references by the function at their other end, in first-site order. */
+function callNodes<X extends { kind: string; status: string; from: string | null }>(
+  refs: X[],
+  fnOf: (x: X) => BriefFunction,
+  nameOf: ((x: X) => string | null) | null,
+): CallNode[] {
+  const out = new Map<string, CallNode & { first: bigint }>();
+  for (const x of refs) {
+    if (x.kind !== 'call' || x.status !== 'established') continue;
+    const f = fnOf(x);
+    const name = f?.name ?? nameOf?.(x) ?? null;
+    if (!name) continue;
+    const key = f?.id ?? `name:${name}`;
+    const site = x.from ? BigInt(x.from) : 0n;
+    const node = out.get(key);
+    if (node) {
+      node.sites++;
+      if (site < node.first) node.first = site;
+    } else out.set(key, { id: f?.id ?? null, name, entry: f?.entry ?? null, sites: 1, first: site });
+  }
+  return [...out.values()].sort((a, b) => (a.first < b.first ? -1 : a.first > b.first ? 1 : 0)).map(({ first: _, ...n }) => n);
 }
 
 export class AnalysisSession {
@@ -790,6 +828,7 @@ export class AnalysisSession {
   async xrefs(target: { id?: string; addr?: string }, direction: 'incoming' | 'outgoing' | 'both') {
     const index = await this.functions();
     const strings = await this.#loadStrings();
+    const names = await this.#loadNames().catch(() => ({ byEntity: new Map<string, string>(), byAddr: new Map<string, string>() }));
     type Ref = { from: { value: string } | null; to: { value: string } | null; from_function: string | null; to_entity: string | null; kind: string; status: string; target_role: string };
     const items: Ref[] = [];
     let cursor: string | undefined;
@@ -804,24 +843,40 @@ export class AnalysisSession {
       items.push(...data.items);
       cursor = data.page.next_cursor ?? undefined;
     } while (cursor && items.length < 10_000);
-    const nameOf = (addr: string | null) => {
-      if (!addr) return null;
-      return index.byEntry.get(addr)?.name ?? (strings.get(addr) ? JSON.stringify(strings.get(addr)!.text) : null);
-    };
-    return items.map((r) => {
-      const from = r.from ? canon(r.from.value) : null;
-      const to = r.to ? canon(r.to.value) : null;
-      const fromFn = r.from_function ? index.byId.get(r.from_function) : undefined;
-      return {
-        from,
-        to,
-        fromFunction: fromFn ? { id: fromFn.id, name: fromFn.name, entry: fromFn.entry } : null,
-        toName: nameOf(to),
-        kind: r.kind,
-        status: r.status,
-        role: r.target_role,
-      };
-    });
+    const brief = (f: FunctionSummary | undefined) => (f ? { id: f.id, name: f.name, entry: f.entry } : null);
+    return (
+      items
+        // A reference with no known target (an unresolved load or store) says nothing about where it goes.
+        .filter((r) => direction === 'incoming' || r.to || r.to_entity)
+        .map((r) => {
+          const from = r.from ? canon(r.from.value) : null;
+          const to = r.to ? canon(r.to.value) : null;
+          const toFn = (to ? index.byEntry.get(to) : undefined) ?? (r.to_entity ? index.byId.get(r.to_entity) : undefined);
+          const s = to ? strings.get(to) : undefined;
+          return {
+            from,
+            to,
+            fromFunction: brief(r.from_function ? index.byId.get(r.from_function) : undefined),
+            toFunction: brief(toFn),
+            toName:
+              toFn?.name ??
+              (s ? JSON.stringify(s.text) : null) ??
+              (r.to_entity ? names.byEntity.get(r.to_entity) : undefined) ??
+              (to ? names.byAddr.get(to) : undefined) ??
+              null,
+            kind: r.kind,
+            status: r.status,
+            role: r.target_role,
+          };
+        })
+    );
+  }
+
+  /** Direct callers and callees of a function (established `call` references). */
+  async calls(functionId: string) {
+    const incoming = await this.xrefs({ id: functionId }, 'incoming');
+    const outgoing = await this.xrefs({ id: functionId }, 'outgoing');
+    return { callers: callNodes(incoming, (x) => x.fromFunction, null), callees: callNodes(outgoing, (x) => x.toFunction, (x) => x.toName) };
   }
 
   // ------------------------------------------------------------- annotations
@@ -901,13 +956,44 @@ export class AnalysisSession {
         if (t.name) this.#typeNames.set(t.name, t.type_id);
         else if (/^[A-Za-z_][A-Za-z0-9_]*\*$/.test(t.key)) this.#typeNames.set(t.key, t.type_id);
       }
-      return { revision: data.revision, declared: [...new Set(data.types.flatMap((t) => (t.name ? [t.name] : [])))] };
+      const named = new Map(data.types.flatMap((t) => (t.name ? [[t.name, t.annotation_id] as const] : [])));
+      return { revision: data.revision, declared: [...named.keys()], annotations: Object.fromEntries(named) };
     });
   }
 
-  /** Removes one declaration from the type library. */
-  async removeLibraryType(annotation: string) {
-    return this.#writes.run(() => this.#apply([{ operation: 'remove', id: annotation }]));
+  /** Removes declarations from the type library, in one revision. */
+  async removeLibraryTypes(annotations: string[]) {
+    if (annotations.length === 0) return { revision: this.binary.revision };
+    return this.#writes.run(() => this.#apply(annotations.map((id) => ({ operation: 'remove', id }))));
+  }
+
+  /**
+   * This app's live annotations on a function (its name, signature and the types the
+   * signature declares), exactly as stored: what undo restores.
+   */
+  async annotationSnapshot(functionId: string): Promise<AnnotationSnapshot> {
+    const all = (await this.#functionAnnotations(functionId)) as (StoredAnnotation & { author: string })[];
+    return all
+      .filter((a) => a.author === AUTHOR && a.status !== 'retracted' && a.entity_id === functionId)
+      .map((a) => ({ id: a.id, value: a.value, status: a.status }))
+      .sort((a, b) => (a.id < b.id ? -1 : 1));
+  }
+
+  /** Makes this app's annotations on a function equal to a snapshot, in one revision. */
+  async restoreAnnotations(functionId: string, snapshot: AnnotationSnapshot) {
+    await this.functionById(functionId);
+    return this.#writes.run(async () => {
+      const current = new Map((await this.annotationSnapshot(functionId)).map((a) => [a.id, a]));
+      const wanted = new Set(snapshot.map((a) => a.id));
+      const edits: unknown[] = [];
+      for (const id of current.keys()) if (!wanted.has(id)) edits.push({ operation: 'remove', id });
+      for (const a of snapshot) {
+        if (JSON.stringify(current.get(a.id)) === JSON.stringify(a)) continue;
+        // An assertion's evidence is recorded by OpenDecomp itself, as when the edit was first made.
+        edits.push({ operation: 'set', id: a.id, entity_id: functionId, value: a.value, status: a.status, evidence_ids: [] });
+      }
+      return edits.length ? this.#apply(edits) : { revision: this.binary.revision };
+    });
   }
 
   /** The current C prototype of a function (its C-like declaration line) and whether the user declared it. */
@@ -1033,5 +1119,13 @@ export class AnalysisSession {
 
   async comments() {
     return this.#workspace.comments(this.record.id);
+  }
+
+  async bookmark(addr: string, description: string | null) {
+    return this.#workspace.setBookmark(this.record.id, canon(addr), description);
+  }
+
+  async bookmarks() {
+    return this.#workspace.bookmarks(this.record.id);
   }
 }

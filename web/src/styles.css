@@ -262,9 +262,13 @@ select:focus {
   padding: 6px 6px 0;
 }
 .tabs button {
-  flex: 1;
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   font-size: 12px;
-  padding: 3px 4px;
+  padding: 3px 2px;
   border-radius: 4px 4px 0 0;
 }
 .side-filter {
@@ -321,6 +325,44 @@ select:focus {
 }
 .side-item.segment .side-primary {
   color: var(--fg-dim);
+}
+
+/* Calls tab: callers / callees trees */
+.call-root {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  padding-top: 6px;
+}
+.call-root-name {
+  color: var(--fn);
+  font-family: var(--mono);
+}
+.call-tree .side-item {
+  height: 22px;
+}
+.call-head {
+  color: var(--fg-dim);
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.call-twisty {
+  flex: none;
+  width: 12px;
+  margin-right: -4px;
+  color: var(--fg-dim);
+  text-align: center;
+}
+.call-sites {
+  font-size: 11px;
+}
+.call-note {
+  cursor: default;
+  font-size: 11px;
+}
+.call-note:hover {
+  background: none;
 }
 
 /* ---------------------------------------------------------------- code */
@@ -760,6 +802,10 @@ select:focus {
 .panel-head .close {
   margin-left: auto;
 }
+.xref-dir button {
+  font-size: 11px;
+  padding: 0 8px;
+}
 .close {
   background: none;
   border: none;
@@ -873,6 +919,24 @@ select:focus {
 }
 .goto-item.active {
   background: var(--cursor);
+}
+.bookmark-item {
+  justify-content: flex-start;
+  gap: 12px;
+  align-items: center;
+}
+.bookmark-item .addr {
+  color: var(--addr);
+}
+.bookmark-where {
+  color: var(--fn);
+  min-width: 140px;
+}
+.bookmark-desc {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 /* ----------------------------------------------------------------- home */

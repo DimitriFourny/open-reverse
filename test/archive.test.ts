@@ -127,6 +127,26 @@ describe('project archive', () => {
     assert.ok(names.every((n) => n === ARCHIVE_MANIFEST || n === 'comments.json' || n.startsWith('binary/') || n.startsWith('project/')));
   });
 
+  test('bookmarks: version 2 with bookmarks.json, version 1 without', async () => {
+    const version = async (bytes: Uint8Array) =>
+      JSON.parse(new TextDecoder().decode((await zipDecode(bytes)).find((e) => e.path === ARCHIVE_MANIFEST)!.data)).version;
+    const plain = await encodeProjectArchive(sample());
+    assert.equal(await version(plain), 1);
+    assert.ok(!(await zipDecode(plain)).some((e) => e.path === 'bookmarks.json'));
+    assert.deepEqual((await decodeProjectArchive(plain)).bookmarks, {});
+    const marked = await encodeProjectArchive({ ...sample(), bookmarks: { '0x401000': 'start here', '0x401010': '' } });
+    assert.equal(await version(marked), 2);
+    assert.deepEqual((await decodeProjectArchive(marked)).bookmarks, { '0x401000': 'start here', '0x401010': '' });
+    await assert.rejects(
+      decodeProjectArchive(await mutate(marked, (es) => (es.find((e) => e.path === 'bookmarks.json')!.data = enc.encode('{"0x1":5}')))),
+      /Invalid bookmark at 0x1/,
+    );
+    await assert.rejects(
+      decodeProjectArchive(await mutate(marked, (es) => (es.find((e) => e.path === 'bookmarks.json')!.data = enc.encode('[]')))),
+      /bookmarks.json must be an object/,
+    );
+  });
+
   test('refuses to encode unsafe project paths', async () => {
     const a = sample();
     a.project.set('../escape', new Uint8Array(1));
@@ -156,7 +176,7 @@ describe('project archive', () => {
         edit(m);
         e.data = enc.encode(JSON.stringify(m));
       });
-    await assert.rejects(decodeProjectArchive(await editManifest((m) => (m.version = 2))), /format version 2/);
+    await assert.rejects(decodeProjectArchive(await editManifest((m) => (m.version = 3))), /format version 3/);
     await assert.rejects(decodeProjectArchive(await editManifest((m) => (m.format = 'other'))), /unknown format/);
     await assert.rejects(decodeProjectArchive(await editManifest((m) => (m.record.id = '0000000000000000'))), /id does not match/);
     await assert.rejects(decodeProjectArchive(await editManifest((m) => (m.record.name = '../x'))), /Invalid binary name/);

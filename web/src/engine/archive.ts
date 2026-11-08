@@ -1,11 +1,14 @@
-// OpenReverse project archive (`<name>.orproj.zip`), format version 1.
+// OpenReverse project archive (`<name>.orproj.zip`), format versions 1 and 2.
 //
 // A plain ZIP file holding one binary and everything OpenReverse keeps for it:
 //
-//   open-reverse.json     manifest: { format: "open-reverse-project", version: 1,
+//   open-reverse.json     manifest: { format: "open-reverse-project", version,
 //                         generator, createdAt, record: BinaryRecord }
 //   binary/<record.name>  the binary itself (its SHA-256 must equal record.sha256)
 //   comments.json         { "<0xaddr>": "text" } user comments
+//   bookmarks.json        { "<0xaddr>": "description" } bookmarks (version 2; written
+//                         only when there are bookmarks, and an archive without them
+//                         says version 1 so older readers still open it)
 //   project/<path>        the OpenDecomp project directory (cache root) as stored
 //                         under /workspace/binaries/<id>/project/: project.sqlite
 //                         (analysis cache, annotations such as renames), images/,
@@ -21,7 +24,8 @@ export { sha256Hex };
 import { DEFAULT_ZIP_LIMITS, ZipError, zipDecode, zipEncode, type ZipEntry, type ZipLimits } from './zip.ts';
 
 export const ARCHIVE_FORMAT = 'open-reverse-project';
-export const ARCHIVE_VERSION = 1;
+/** The newest version this code reads and writes. */
+export const ARCHIVE_VERSION = 2;
 export const ARCHIVE_MANIFEST = 'open-reverse.json';
 export const ARCHIVE_EXTENSION = '.orproj.zip';
 
@@ -37,6 +41,8 @@ export interface ProjectArchive {
   record: ArchiveRecord;
   binary: Uint8Array;
   comments: Record<string, string>;
+  /** Bookmarked addresses and their descriptions (empty when the archive has none). */
+  bookmarks?: Record<string, string>;
   /** Files of the OpenDecomp project directory, keyed by path relative to it. */
   project: Map<string, Uint8Array>;
 }
@@ -93,9 +99,12 @@ export async function encodeProjectArchive(
   opts: { createdAt?: Date; signal?: AbortSignal; onEntry?: (index: number, total: number) => void } = {},
 ): Promise<Uint8Array> {
   const createdAt = opts.createdAt ?? new Date();
+  const bookmarks = archive.bookmarks ?? {};
+  const hasBookmarks = Object.keys(bookmarks).length > 0;
   const manifest: ArchiveManifest = {
     format: ARCHIVE_FORMAT,
-    version: ARCHIVE_VERSION,
+    // The oldest version that holds everything: version 1 readers reject unknown entries.
+    version: hasBookmarks ? 2 : 1,
     generator: 'OpenReverse',
     createdAt: createdAt.toISOString(),
     record: archive.record,
@@ -104,6 +113,7 @@ export async function encodeProjectArchive(
     { path: ARCHIVE_MANIFEST, data: enc.encode(`${JSON.stringify(manifest, null, 2)}\n`) },
     { path: `binary/${archive.record.name}`, data: archive.binary },
     { path: 'comments.json', data: enc.encode(JSON.stringify(archive.comments)) },
+    ...(hasBookmarks ? [{ path: 'bookmarks.json', data: enc.encode(JSON.stringify(bookmarks)) }] : []),
   ];
   for (const [rel, data] of [...archive.project].sort((a, b) => (a[0] < b[0] ? -1 : 1))) {
     const safe = safeRelativePath(rel);
@@ -136,14 +146,15 @@ function validateRecord(value: unknown): ArchiveRecord {
   return { id: r.id, name: r.name, sha256: r.sha256, size: r.size, addedAt: r.addedAt };
 }
 
-function validateComments(value: unknown): Record<string, string> {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) throw new ArchiveError('comments.json must be an object');
+/** comments.json and bookmarks.json: `{ "<0xaddr>": "text" }`. */
+function validateAddressTexts(value: unknown, what: 'comment' | 'bookmark'): Record<string, string> {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) throw new ArchiveError(`${what}s.json must be an object`);
   const entries = Object.entries(value as Record<string, unknown>);
-  if (entries.length > MAX_COMMENTS) throw new ArchiveError('Too many comments');
+  if (entries.length > MAX_COMMENTS) throw new ArchiveError(`Too many ${what}s`);
   const out: Record<string, string> = {};
   for (const [k, v] of entries) {
-    if (!/^0x[0-9a-f]{1,16}$/.test(k)) throw new ArchiveError(`Invalid comment address ${JSON.stringify(k.slice(0, 40))}`);
-    if (typeof v !== 'string' || v.length > MAX_COMMENT_CHARS) throw new ArchiveError(`Invalid comment at ${k}`);
+    if (!/^0x[0-9a-f]{1,16}$/.test(k)) throw new ArchiveError(`Invalid ${what} address ${JSON.stringify(k.slice(0, 40))}`);
+    if (typeof v !== 'string' || v.length > MAX_COMMENT_CHARS) throw new ArchiveError(`Invalid ${what} at ${k}`);
     out[k] = v;
   }
   return out;
@@ -179,11 +190,13 @@ export async function decodeProjectArchive(bytes: Uint8Array, limits: ArchiveLim
   const binaryPath = `binary/${record.name}`;
   let binary: Uint8Array | null = null;
   let comments: Record<string, string> = {};
+  let bookmarks: Record<string, string> = {};
   const project = new Map<string, Uint8Array>();
   for (const [path, data] of byPath) {
     if (path === ARCHIVE_MANIFEST) continue;
     if (path === binaryPath) binary = data;
-    else if (path === 'comments.json') comments = validateComments(parseJson(data, 'comments.json'));
+    else if (path === 'comments.json') comments = validateAddressTexts(parseJson(data, 'comments.json'), 'comment');
+    else if (path === 'bookmarks.json') bookmarks = validateAddressTexts(parseJson(data, 'bookmarks.json'), 'bookmark');
     else if (path === 'project/' || path === 'binary/') continue;
     else if (path.startsWith('project/')) {
       const isDir = path.endsWith('/');
@@ -204,5 +217,5 @@ export async function decodeProjectArchive(bytes: Uint8Array, limits: ArchiveLim
   if (!binary) throw new ArchiveError(`The archive has no binary (${binaryPath})`);
   if (binary.byteLength !== record.size) throw new ArchiveError('The binary size does not match the manifest');
   if ((await sha256Hex(binary)) !== record.sha256) throw new ArchiveError('The binary does not match its sha256 (corrupt archive)');
-  return { record, binary, comments, project };
+  return { record, binary, comments, bookmarks, project };
 }

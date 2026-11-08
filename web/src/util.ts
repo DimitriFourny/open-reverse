@@ -41,3 +41,26 @@ export function isEditableTarget(t: EventTarget | null): boolean {
   const el = t as HTMLElement | null;
   return !!el && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' || el.tagName === 'SELECT' || el.isContentEditable);
 }
+
+/**
+ * `name+0x10` for an address inside one of `sorted` (functions by entry), else null: the
+ * last function starting at or before it, when the address is within its size.
+ */
+export function functionOffset(sorted: readonly { name: string; entry: string; size: number }[], addr: string): string | null {
+  const a = BigInt(addr);
+  let lo = 0;
+  let hi = sorted.length - 1;
+  let hit = -1;
+  while (lo <= hi) {
+    const mid = (lo + hi) >> 1;
+    if (BigInt(sorted[mid]!.entry) <= a) {
+      hit = mid;
+      lo = mid + 1;
+    } else hi = mid - 1;
+  }
+  const f = sorted[hit];
+  if (!f) return null;
+  const off = a - BigInt(f.entry);
+  if (off >= BigInt(Math.max(f.size, 1))) return null;
+  return off === 0n ? f.name : `${f.name}+0x${off.toString(16)}`;
+}
