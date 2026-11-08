@@ -29,6 +29,7 @@ function sample(): ProjectArchive {
     record: { id: sha256.slice(0, 16), name: 'demo.bin', sha256, size: binary.length, addedAt: '2026-01-02T03:04:05.000Z' },
     binary,
     comments: { '0x401000': 'entry point' },
+    data: { defs: {}, names: {} },
     project: new Map([
       [`${sha256}.default/project.sqlite`, sqlite],
       [`${sha256}.default/images/${sha256}`, binary],
@@ -127,6 +128,27 @@ describe('project archive', () => {
     assert.ok(names.every((n) => n === ARCHIVE_MANIFEST || n === 'comments.json' || n.startsWith('binary/') || n.startsWith('project/')));
   });
 
+  test('data definitions: version 2 with data.json, version 1 without', async () => {
+    const plain = await encodeProjectArchive(sample());
+    const manifestOf = async (bytes: Uint8Array) =>
+      JSON.parse(new TextDecoder().decode((await zipDecode(bytes)).find((e) => e.path === ARCHIVE_MANIFEST)!.data));
+    assert.equal((await manifestOf(plain)).version, 1);
+    assert.deepEqual((await decodeProjectArchive(plain)).data, { defs: {}, names: {} });
+    const data = { defs: { '0x402000': { type: 'u32' as const, count: 4, od: true }, '0x402010': { type: 'string' as const, count: 6 } }, names: { '0x402000': 'table' } };
+    const v2 = await encodeProjectArchive({ ...sample(), data });
+    assert.equal((await manifestOf(v2)).version, 2);
+    assert.ok((await zipDecode(v2)).some((e) => e.path === 'data.json'));
+    assert.deepEqual((await decodeProjectArchive(v2)).data, data);
+    // data.json is a version 2 entry, and is validated.
+    const asV1 = await mutate(v2, (es) => {
+      const e = es.find((x) => x.path === ARCHIVE_MANIFEST)!;
+      e.data = enc.encode(JSON.stringify({ ...JSON.parse(new TextDecoder().decode(e.data)), version: 1 }));
+    });
+    await assert.rejects(decodeProjectArchive(asV1), /Unexpected entry/);
+    for (const bad of ['{"defs":{"main":{"type":"u8","count":1}}}', '{"defs":{"0x1":{"type":"u128","count":1}}}', '{"defs":{"0x1":{"type":"u8","count":0}}}', '{"names":{"0x1":"a b"}}', '[]'])
+      await assert.rejects(decodeProjectArchive(await mutate(v2, (es) => (es.find((e) => e.path === 'data.json')!.data = enc.encode(bad)))), ArchiveError, bad);
+  });
+
   test('bookmarks: version 2 with bookmarks.json, version 1 without', async () => {
     const version = async (bytes: Uint8Array) =>
       JSON.parse(new TextDecoder().decode((await zipDecode(bytes)).find((e) => e.path === ARCHIVE_MANIFEST)!.data)).version;
@@ -145,6 +167,23 @@ describe('project archive', () => {
       decodeProjectArchive(await mutate(marked, (es) => (es.find((e) => e.path === 'bookmarks.json')!.data = enc.encode('[]')))),
       /bookmarks.json must be an object/,
     );
+  });
+
+  test('version 2 with bookmarks and data definitions together; bookmarks.json is a version 2 entry', async () => {
+    const data = { defs: { '0x402000': { type: 'ptr' as const, count: 1 } }, names: {} };
+    const bytes = await encodeProjectArchive({ ...sample(), bookmarks: { '0x401000': 'entry' }, data });
+    const entries = await zipDecode(bytes);
+    assert.equal(JSON.parse(new TextDecoder().decode(entries.find((e) => e.path === ARCHIVE_MANIFEST)!.data)).version, 2);
+    assert.ok(entries.some((e) => e.path === 'bookmarks.json') && entries.some((e) => e.path === 'data.json'));
+    const back = await decodeProjectArchive(bytes);
+    assert.deepEqual(back.bookmarks, { '0x401000': 'entry' });
+    assert.deepEqual(back.data, data);
+    const asV1 = await mutate(bytes, (es) => {
+      es.splice(es.findIndex((e) => e.path === 'data.json'), 1);
+      const e = es.find((x) => x.path === ARCHIVE_MANIFEST)!;
+      e.data = enc.encode(JSON.stringify({ ...JSON.parse(new TextDecoder().decode(e.data)), version: 1 }));
+    });
+    await assert.rejects(decodeProjectArchive(asV1), /Unexpected entry in archive: "bookmarks.json"/);
   });
 
   test('refuses to encode unsafe project paths', async () => {

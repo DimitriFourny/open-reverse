@@ -4,10 +4,12 @@
 //   /workspace/meta/<id>.json            BinaryRecord               (always loaded)
 //   /workspace/meta/<id>.comments.json   { "<va>": "text" }         (always loaded)
 //   /workspace/meta/<id>.bookmarks.json  { "<va>": "description" }  (always loaded)
+//   /workspace/meta/<id>.data.json       WorkspaceData: data definitions and listing names
 //   /workspace/binaries/<id>/<name>      the binary          (loaded on open)
 //   /workspace/binaries/<id>/project/    OpenDecomp cache root
 
 import { sha256 } from '@noble/hashes/sha2.js';
+import type { DataDef } from './linear.ts';
 import { vfs } from './vfs.ts';
 
 export interface BinaryRecord {
@@ -16,6 +18,18 @@ export interface BinaryRecord {
   sha256: string;
   size: number;
   addedAt: string;
+}
+
+/** What the listing keeps per binary besides comments. */
+export interface WorkspaceData {
+  /** Data definitions by address; `od`: declared to OpenDecomp as a `type` annotation too. */
+  defs: Record<string, DataDef & { od?: boolean }>;
+  /** Global names by address, as the listing's labels (OpenDecomp keeps its own `name` annotations). */
+  names: Record<string, string>;
+}
+
+export function emptyData(): WorkspaceData {
+  return { defs: {}, names: {} };
 }
 
 const ROOT = '/workspace';
@@ -118,6 +132,7 @@ export class Workspace {
     comments: Record<string, string>,
     project: Map<string, Uint8Array>,
     bookmarks: Record<string, string> = {},
+    data: WorkspaceData = emptyData(),
   ): Promise<void> {
     const dir = this.dir(record.id);
     if (this.get(record.id) || vfs.get(dir)) throw new Error(`Binary ${record.id} already exists`);
@@ -133,13 +148,25 @@ export class Workspace {
     }
     if (Object.keys(comments).length) writeJson(`${META}/${record.id}.comments.json`, comments);
     if (Object.keys(bookmarks).length) writeJson(`${META}/${record.id}.bookmarks.json`, bookmarks);
+    if (!isEmptyData(data)) writeJson(`${META}/${record.id}.data.json`, data);
     writeJson(`${META}/${record.id}.json`, record);
     await vfs.flush();
   }
 
-  /** Paths of a binary's metadata files (record, comments, bookmarks). */
+  /** Paths of a binary's metadata files (record, comments, bookmarks, data definitions). */
   metaPaths(id: string): string[] {
-    return [`${META}/${check(id)}.json`, `${META}/${id}.comments.json`, `${META}/${id}.bookmarks.json`];
+    return [`${META}/${check(id)}.json`, `${META}/${id}.comments.json`, `${META}/${id}.bookmarks.json`, `${META}/${id}.data.json`];
+  }
+
+  async data(id: string): Promise<WorkspaceData> {
+    return { ...emptyData(), ...readJson<Partial<WorkspaceData>>(`${META}/${check(id)}.data.json`, {}) };
+  }
+
+  async setData(id: string, data: WorkspaceData): Promise<void> {
+    const path = `${META}/${check(id)}.data.json`;
+    if (isEmptyData(data)) {
+      if (vfs.get(path)) vfs.unlink(path);
+    } else writeJson(path, data);
   }
 
   async comments(id: string): Promise<Record<string, string>> {
@@ -166,6 +193,10 @@ export class Workspace {
     writeJson(`${META}/${id}.bookmarks.json`, bookmarks);
     return bookmarks;
   }
+}
+
+export function isEmptyData(data: WorkspaceData): boolean {
+  return Object.keys(data.defs).length === 0 && Object.keys(data.names).length === 0;
 }
 
 /** SHA-256 of `bytes` as hex. `crypto.subtle` exists only in secure contexts (HTTPS or

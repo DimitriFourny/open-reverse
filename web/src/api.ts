@@ -216,8 +216,10 @@ export interface DecompileOptions {
 
 import type { RpcResponse } from './engine/engine-worker.ts';
 import type { TaskProgress } from './engine/tasks.ts';
+import type { DataDef, DataType, LinearRow, LinearWindow } from './engine/linear.ts';
+import type { DataAction } from './engine/session.ts';
 
-export type { TaskProgress };
+export type { DataAction, DataDef, DataType, LinearRow, LinearWindow, TaskProgress };
 
 type Pending = { resolve: (v: unknown) => void; reject: (e: Error) => void; onProgress?: (p: TaskProgress) => void };
 let worker: Worker | null = null;
@@ -308,6 +310,23 @@ export const api = {
     call<{ revision: number; indexState: string; discovery: Discovery; functions: FunctionSummary[] }>('functions', [bid]),
   functionAt: (bid: string, addr: string) => call<{ function: FunctionSummary | null }>('functionAt', [bid, addr]),
   listing: (bid: string, fid: string) => call<Listing>('listing', [bid, fid]),
+  /** Rows of the whole-image listing: up to `before` rows before `addr` and `after` from it. */
+  /** `quick`: stop at neighbouring functions not listed yet (a first paint; extensions fetch the rest). */
+  linear: (bid: string, addr: string, before: number, after: number, quick = false) =>
+    call<LinearWindow>('linear', [bid, addr, before, after, quick]),
+  dataAt: (bid: string, addr: string) => call<{ start: string; def: DataDef | null; type: DataType; maxCount: number }>('dataAt', [bid, addr]),
+  defineData: (bid: string, addr: string, action: DataAction, count?: number) =>
+    call<{
+      revision: number;
+      start: string;
+      def: DataDef | null;
+      note: string | null;
+      /** The definitions it replaced, and the range an undo restores. */
+      replaced: Record<string, DataDef>;
+      range: { start: string; end: string };
+    }>('defineData', [bid, addr, action, count]),
+  restoreData: (bid: string, start: string, end: string, defs: Record<string, DataDef>) =>
+    call<{ revision: number; note: string | null }>('restoreData', [bid, start, end, defs]),
   decompile: (bid: string, fid: string, o: DecompileOptions, signal?: AbortSignal) => call<Decompilation>('decompile', [bid, fid, o], signal),
   xrefs: (bid: string, target: { id?: string; addr?: string }, direction: XrefDirection = 'incoming') => call<{ xrefs: Xref[] }>('xrefs', [bid, target, direction]),
   calls: (bid: string, fid: string) => call<{ callers: CallNode[]; callees: CallNode[] }>('calls', [bid, fid]),
@@ -317,7 +336,7 @@ export const api = {
   types: (bid: string) => call<TypesInfo>('types', [bid]),
   memory: (bid: string, addr: string, length: number) => call<MemoryChunk>('memory', [bid, addr, length]),
   comments: (bid: string) => call<{ comments: Record<string, string> }>('comments', [bid]),
-  rename: (bid: string, target: { id?: string; addr?: string }, name: string) => call<{ revision: number }>('rename', [bid, target, name]),
+  rename: (bid: string, target: { id?: string; addr?: string }, name: string) => call<{ revision: number; note: string | null }>('rename', [bid, target, name]),
   /** `annotations`: the library annotation of each declared name. */
   declareTypes: (bid: string, source: string) =>
     call<{ revision: number; declared: string[]; annotations: Record<string, string> }>('declareTypes', [bid, source]),

@@ -18,6 +18,8 @@ import {
   type TypesInfo,
   type LibraryType,
   type Xref,
+  type DataAction,
+  type DataDef,
   type XrefDirection,
 } from './api.ts';
 import { historyFor, type UndoEntry } from './undo.ts';
@@ -35,8 +37,11 @@ export interface Location {
 /** What N (rename) and X (xrefs) act on. */
 export type Selection =
   | { kind: 'function'; fnId: string }
-  /** An address; `global`: a global the pseudocode names, with its declared C type (Y retypes it). */
-  | { kind: 'addr'; addr: string; global?: { name: string; type: string } }
+  /**
+   * An address: an operand target, or a data item of the listing (`name`: its label);
+   * `global`: a global the pseudocode names, with its declared C type (Y retypes it).
+   */
+  | { kind: 'addr'; addr: string; name?: string; global?: { name: string; type: string } }
   /** A parameter or local of the pseudocode (N renames it, Y retypes it). */
   | { kind: 'variable'; fnId: string; id: string; name: string; parameter: boolean; type: string | null };
 
@@ -49,6 +54,8 @@ export type Dialog =
   | { kind: 'comment'; addr: string; current: string }
   | { kind: 'signature'; fnId: string; name: string; current: string; declared: boolean }
   | { kind: 'renameVar'; fnId: string; valueId: string; current: string; parameter: boolean }
+  /** `*`: an array of `type` at `addr`. */
+  | { kind: 'array'; addr: string; type: string; current: number; max: number }
   /** Y on a variable or global: its C type. */
   | { kind: 'retype'; target: TypeTarget; what: string; current: string }
   /** S on a pointer variable: a new structure from the members accessed through it. */
@@ -90,6 +97,8 @@ export interface State {
   listing: Async<Listing>;
   decomp: Async<Decompilation>;
   comments: Record<string, string>;
+  /** Bumped when data definitions or listing names change (the linear view reloads). */
+  dataVersion: number;
   bookmarks: Record<string, string>;
   selection: Selection | null;
   /** Instructions highlighted from a pseudo-code click. */
@@ -144,6 +153,7 @@ let state: State = {
   listing: idle(),
   decomp: idle(),
   comments: {},
+  dataVersion: 0,
   bookmarks: {},
   selection: null,
   linked: new Set(),
@@ -371,8 +381,10 @@ export async function navigate(
         fnId = null;
       }
     }
-    if (!fnId) view = 'hex';
+    // Outside every function: the whole-image listing shows it (the graph needs a function).
+    if (!fnId && view === 'graph') view = 'linear';
   }
+  // Data keeps the last function in the pseudocode pane, as IDA does.
   const loc: Location = { fnId: fnId ?? state.loc?.fnId ?? null, addr: a, view };
   setState((s) => ({
     loc,
@@ -385,10 +397,15 @@ export async function navigate(
   await loadCurrent();
 }
 
-/** Move the cursor within the current view without a history entry. */
-export function setCursor(addr: string, selection: Selection | null = null): void {
-  setState((s) => (s.loc ? { loc: { ...s.loc, addr: canon(addr) }, selection, linked: new Set() } : {}));
+/**
+ * Move the cursor within the current view without a history entry. `fnId`: the function the
+ * new cursor line belongs to (the whole-image listing crosses functions); the pseudocode follows.
+ */
+export function setCursor(addr: string, selection: Selection | null = null, fnId?: string): void {
+  const change = fnId !== undefined && fnId !== state.loc?.fnId;
+  setState((s) => (s.loc ? { loc: { ...s.loc, addr: canon(addr), ...(change ? { fnId } : {}) }, selection, linked: new Set() } : {}));
   writeHash();
+  if (change) void loadCurrent();
 }
 
 export function setView(view: ViewMode): void {
@@ -600,10 +617,15 @@ async function restore(fnId: string, snap: AnnotationSnapshot): Promise<void> {
   await refreshAfterAnnotation();
 }
 
-async function applyRename(target: XrefTarget, name: string): Promise<void> {
-  await api.rename(state.bid!, target, name);
-  if (target.addr) knownNames.set(`${state.bid}|va:${target.addr}`, name.trim());
+async function applyRename(target: XrefTarget, name: string): Promise<string | null> {
+  const { note } = await api.rename(state.bid!, target, name);
+  if (target.addr) {
+    knownNames.set(`${state.bid}|va:${target.addr}`, name.trim());
+    // A global's name is also a label of the whole-image listing.
+    setState((s) => ({ dataVersion: s.dataVersion + 1 }));
+  }
   await refreshAfterAnnotation();
+  return note;
 }
 
 export const rename = tracked(async (target: XrefTarget, name: string): Promise<void> => {
@@ -620,8 +642,10 @@ export const rename = tracked(async (target: XrefTarget, name: string): Promise<
       if (JSON.stringify(before) !== JSON.stringify(after)) record(bid, { label, undo: () => restore(fn.id, before), redo: () => restore(fn.id, after) });
     } else {
       const previous = (target.addr && knownNames.get(`${bid}|va:${target.addr}`)) || '';
-      await applyRename(target, name);
-      if (previous !== name.trim()) record(bid, { label, undo: () => applyRename(target, previous), redo: () => applyRename(target, name) });
+      const note = await applyRename(target, name);
+      if (previous !== name.trim())
+        record(bid, { label, undo: async () => void (await applyRename(target, previous)), redo: async () => void (await applyRename(target, name)) });
+      if (note) return toast(`Renamed to ${name.trim()} (${note})`);
     }
     toast(name.trim() ? `Renamed to ${name.trim()}` : 'Name reset');
   } catch (e) {
@@ -693,7 +717,10 @@ export function beginRename(): void {
   else if (selection?.kind === 'addr') {
     fn = byEntry.get(selection.addr);
     if (!fn && !listing.data?.instructions.some((i) => i.addr === selection.addr)) {
-      const name = selection.global?.name ?? '';
+      const name = selection.global?.name || selection.name || '';
+      // The name shown is the one an undo of this rename goes back to.
+      const known = `${state.bid}|va:${selection.addr}`;
+      if (name && !knownNames.has(known)) knownNames.set(known, name);
       setState({ dialog: { kind: 'rename', target: { addr: selection.addr }, current: name, what: `global ${name ? `${name} ` : ''}at ${selection.addr}` } });
       return;
     }
@@ -724,7 +751,8 @@ function xrefTarget(direction: XrefDirection): { target: XrefTarget; name: strin
   }
   if (selection?.kind === 'addr') {
     const f = byEntry.get(selection.addr);
-    return f ? fnTarget(f) : { target: { addr: selection.addr }, name: selection.addr };
+    if (f) return fnTarget(f);
+    return { target: { addr: selection.addr }, name: selection.name ?? selection.addr };
   }
   const insns = listing.data?.instructions ?? [];
   const insn = loc && (loc.view === 'linear' || loc.view === 'graph') ? insns.find((i) => i.addr === loc.addr) : undefined;
@@ -748,6 +776,67 @@ function xrefTarget(direction: XrefDirection): { target: XrefTarget; name: strin
   }
   const f = loc?.fnId ? byId.get(loc.fnId) : undefined;
   return f ? fnTarget(f) : null;
+}
+
+// ------------------------------------------------------------ data (D A O * U)
+
+/** Applies a data key at the cursor (D cycles byte/word/dword/qword, A string, O pointer, U undefine). */
+const defText = (d: DataDef | null) => (d ? (d.type === 'string' ? `string (${d.count} bytes)` : d.count > 1 ? `${d.type}[${d.count}]` : d.type) : 'undefined');
+
+/** After a data definition change: the listing reloads; a new revision refreshes every view. */
+async function afterData(before: number, revision: number): Promise<void> {
+  setState((s) => ({ dataVersion: s.dataVersion + 1 }));
+  if (revision !== before) await refreshAfterAnnotation();
+}
+
+/** Puts back the definitions of [start, end) (undo/redo of a data key). */
+async function applyData(range: { start: string; end: string }, defs: Record<string, DataDef>): Promise<void> {
+  const before = state.revision;
+  const r = await api.restoreData(state.bid!, range.start, range.end, defs);
+  await afterData(before, r.revision);
+}
+
+/** Applies a data key at the cursor (D cycles byte/word/dword/qword, A string, O pointer, * array, U undefine). */
+export const defineData = tracked(async (action: DataAction, count?: number, at?: string): Promise<void> => {
+  const { bid, loc } = state;
+  const addr = at ?? loc?.addr;
+  if (!bid || !addr) return;
+  try {
+    const before = state.revision;
+    const r = await api.defineData(bid, addr, action, count);
+    await afterData(before, r.revision);
+    const after = r.def ? { [r.start]: r.def } : {};
+    record(bid, {
+      label: `${defText(r.def)} at ${r.start}`,
+      undo: () => applyData(r.range, r.replaced),
+      redo: () => applyData(r.range, after),
+    });
+    toast(`${r.start}: ${defText(r.def)}${r.note ? ` — ${r.note}` : ''}`, r.note ? 'error' : 'info');
+  } catch (e) {
+    toast(errorText(e), 'error');
+  }
+});
+
+/** `*`: asks how many elements the array at the cursor has. */
+export async function beginArray(): Promise<void> {
+  const { bid, loc } = state;
+  if (!bid || !loc) return;
+  try {
+    const d = await api.dataAt(bid, loc.addr);
+    setState({ dialog: { kind: 'array', addr: d.start, type: d.type, current: d.def && d.def.type !== 'string' ? d.def.count : Math.max(1, d.maxCount), max: d.maxCount } });
+  } catch (e) {
+    toast(errorText(e), 'error');
+  }
+}
+
+/** IDA's P. OpenDecomp's discovery takes no seed address, so there is no way to create a function. */
+export function createFunction(): void {
+  const addr = state.loc?.addr;
+  if (!addr) return;
+  toast(
+    `Cannot create a function at ${addr}: OpenDecomp finds functions itself (functions_discover takes no start address) and has no way to add one`,
+    'error',
+  );
 }
 
 export function beginComment(): void {
@@ -855,7 +944,7 @@ export async function beginSignature(): Promise<void> {
   }
   if (selection?.kind === 'addr' && selection.global) {
     const g = selection.global;
-    setState({ dialog: { kind: 'retype', target: { addr: selection.addr }, what: `global ${g.name}`, current: g.type } });
+    setState({ dialog: { kind: 'retype', target: { addr: selection.addr }, what: `global ${g.name || selection.addr}`, current: g.type } });
     return;
   }
   const fn = (selection?.kind === 'function' ? byId.get(selection.fnId) : undefined) ?? (loc?.fnId ? byId.get(loc.fnId) : undefined);
