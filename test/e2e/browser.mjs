@@ -177,6 +177,84 @@ let failures = 0;
     await page.waitForSelector('.hb:not(:empty)');
     await page.keyboard.press('h');
   });
+  const toast = (text) => page.waitForSelector(`.toast:has-text(${JSON.stringify(text)})`, { timeout: 120000 });
+  await step('undo / redo a rename and a comment (Ctrl+Z, Ctrl+Shift+Z, Ctrl+Y)', async () => {
+    await page.locator('.side-item', { hasText: 'fixture_check' }).click();
+    await page.locator('.row.insn').first().click();
+    await page.keyboard.press('n');
+    await page.fill('.modal-input', 'checker');
+    await page.keyboard.press('Enter');
+    await page.waitForSelector('.side-item.active:has-text("checker")', { timeout: 60000 });
+    await page.keyboard.press('Control+z');
+    await toast('Undid rename of fixture_check');
+    await page.waitForSelector('.side-item.active:has-text("fixture_check")', { timeout: 60000 });
+    await page.keyboard.press('Control+Shift+z');
+    await page.waitForSelector('.side-item.active:has-text("checker")', { timeout: 60000 });
+    await page.keyboard.press('Control+z');
+    await page.waitForSelector('.side-item.active:has-text("fixture_check")', { timeout: 60000 });
+    await page.locator('.row.insn').nth(3).click();
+    await page.keyboard.press(';');
+    await page.fill('.modal-input', 'short-lived');
+    await page.keyboard.press('Enter');
+    await page.waitForSelector('.user-comment:has-text("short-lived")');
+    await page.keyboard.press('Control+z');
+    await page.waitForSelector('.user-comment:has-text("short-lived")', { state: 'detached' });
+    await page.keyboard.press('Control+y');
+    await page.waitForSelector('.user-comment:has-text("short-lived")');
+    await page.keyboard.press('Control+z');
+    await page.waitForSelector('.user-comment:has-text("short-lived")', { state: 'detached' });
+    await page.waitForSelector('.user-comment:has-text("persisted comment")');
+  });
+  await step('xrefs from (Shift+X) and the To / From toggle', async () => {
+    await page.locator('.row.insn').first().click();
+    await page.keyboard.press('Shift+X');
+    await page.waitForSelector('.panel-head:has-text("Xrefs from fixture_check")');
+    await page.waitForSelector('.xref-table tbody tr:has-text("fixture_arithmetic")', { timeout: 60000 });
+    await page.locator('.xref-dir button', { hasText: 'To' }).click();
+    await page.waitForSelector('.panel-head:has-text("Xrefs to fixture_check")');
+    await page.locator('.xref-dir button', { hasText: 'From' }).click();
+    await page.locator('.xref-table tbody tr', { hasText: 'fixture_arithmetic' }).first().click();
+    await page.waitForSelector('.side-item.active:has-text("fixture_arithmetic")', { timeout: 60000 });
+    await page.keyboard.press('Escape'); // closes the panel
+    await page.keyboard.press('Escape'); // back
+    await page.waitForSelector('.side-item.active:has-text("fixture_check")', { timeout: 60000 });
+  });
+  await step('call tree: callers and callees, lazy expansion, click to navigate', async () => {
+    await page.locator('.tabs button', { hasText: 'Calls' }).click();
+    await page.waitForSelector('.call-root:has-text("fixture_check")');
+    const callee = page.locator('.call-node', { hasText: 'my_max' }).first();
+    await callee.waitFor({ timeout: 60000 });
+    await page.waitForSelector('.call-node:has-text("fixture_entry")'); // a caller
+    await page.locator('.call-node', { hasText: 'fixture_entry' }).first().locator('.call-twisty').click();
+    await page.waitForFunction(() => ![...document.querySelectorAll('.call-note')].some((n) => n.textContent.includes('Loading')), null, { timeout: 60000 });
+    await callee.click();
+    await page.waitForSelector('.call-root:has-text("my_max")', { timeout: 60000 });
+    await page.waitForSelector('.call-node:has-text("fixture_check")'); // its caller
+    await page.keyboard.press('Escape');
+    await page.locator('.tabs button', { hasText: 'Functions' }).click();
+    await page.waitForSelector('.side-item.active:has-text("fixture_check")', { timeout: 60000 });
+  });
+  await step('bookmarks: Alt+M marks, Ctrl+M lists, jumps and removes', async () => {
+    await page.locator('.row.insn').nth(4).click();
+    const at = await page.locator('.row.cursor .addr').first().textContent();
+    await page.keyboard.press('Alt+m');
+    await page.fill('.modal-input', 'check loop');
+    await page.keyboard.press('Enter');
+    await toast('Bookmarked');
+    await page.locator('.row.insn').nth(8).click();
+    await page.keyboard.press('Alt+m');
+    await page.keyboard.press('Enter');
+    await page.locator('.side-item', { hasText: 'fixture_arithmetic' }).click();
+    await page.waitForSelector('.side-item.active:has-text("fixture_arithmetic")', { timeout: 60000 });
+    await page.keyboard.press('Control+m');
+    await page.waitForSelector('.bookmark-item:has-text("check loop")');
+    if ((await page.locator('.bookmark-item').count()) !== 2) throw new Error('expected 2 bookmarks');
+    await page.locator('.bookmark-item').nth(1).locator('.close').click();
+    await page.waitForFunction(() => document.querySelectorAll('.bookmark-item').length === 1);
+    await page.keyboard.press('Enter');
+    await page.waitForSelector('.side-item.active:has-text("fixture_check")', { timeout: 60000 });
+    if ((await page.locator('.row.cursor .addr').first().textContent()) !== at) throw new Error('did not jump to the bookmark');
+  });
   for (const f of ['macho-arm64-symbols', 'pe-x86_64-symbols.exe']) {
     await step(`open ${f}`, async () => {
       await page.locator('.brand').click();
@@ -270,6 +348,28 @@ let failures = 0;
     await page.keyboard.press('Enter');
     await page.waitForSelector('.pline:has-text("return total;")', { timeout: 120000 });
   });
+  await step('undo a local rename, a signature and a type redeclaration', async () => {
+    await page.locator('.row.insn').first().click();
+    await page.keyboard.press('Control+z');
+    await page.waitForSelector('.pline:has-text("return accumulator;")', { timeout: 120000 });
+    await page.keyboard.press('Control+z');
+    await toast('Undid signature of _fixture_arithmetic');
+    await page.waitForSelector('.side-item:has-text("_fixture_arithmetic")', { timeout: 120000 });
+    await page.keyboard.press('Control+y');
+    await page.waitForSelector('.side-item:has-text("arith")', { timeout: 120000 });
+    await page.keyboard.press('Control+y');
+    await page.waitForSelector('.pline:has-text("return total;")', { timeout: 120000 });
+    await page.locator('.seg button', { hasText: 'Types' }).click();
+    await page.waitForSelector('.lib-type:has-text("typedef uint32_t count_t")', { timeout: 120000 });
+    await page.fill('.types-input', 'typedef int count_t;');
+    await page.keyboard.press('Control+Enter');
+    await page.waitForSelector('.lib-type:has-text("typedef int32_t count_t")', { timeout: 120000 });
+    await page.locator('.types-section').first().click(); // out of the editor, whose Ctrl+Z is the text's own
+    await page.keyboard.press('Control+z');
+    await toast('Undid declaration of count_t');
+    await page.waitForSelector('.lib-type:has-text("typedef uint32_t count_t")', { timeout: 120000 });
+    await page.locator('.seg button', { hasText: 'Linear' }).click();
+  });
   if (existsSync(STRIPPED)) await step(`stripped ${STRIPPED} with background discovery`, async () => {
     await page.locator('.brand').click();
     await page.setInputFiles('input[type=file]', STRIPPED);
@@ -324,6 +424,7 @@ let failures = 0;
     if (name !== 'elf-x86_64-symbols.orproj.zip') throw new Error(`unexpected name ${name}`);
     const archive = await decodeProjectArchive(bytes);
     if (archive.comments[Object.keys(archive.comments)[0]] !== 'persisted comment') throw new Error('comment missing from archive');
+    if (!Object.values(archive.bookmarks).includes('check loop')) throw new Error('bookmark missing from archive');
     if (![...archive.project.keys()].some((k) => k.endsWith('/project.sqlite'))) throw new Error('project.sqlite missing');
     if (Buffer.compare(Buffer.from(archive.binary), readFileSync(FIX + 'elf-x86_64-symbols')) !== 0) throw new Error('binary differs');
     console.log(`      ${name}: ${(bytes.length / 1024).toFixed(0)} KiB, ${archive.project.size} project files`);
@@ -358,6 +459,9 @@ let failures = 0;
     await page.waitForSelector('.user-comment:has-text("persisted comment")', { timeout: 60000 });
     await page.waitForSelector('.pline:has-text("my_max(")', { timeout: 120000 });
     await page.waitForSelector('.pane-head:has-text("cached")', { timeout: 10000 });
+    await page.keyboard.press('Control+m');
+    await page.waitForSelector('.bookmark-item:has-text("check loop")');
+    await page.keyboard.press('Escape');
   });
   await step('reset project keeps binary and comments, drops renames', async () => {
     await page.locator('.brand').click();

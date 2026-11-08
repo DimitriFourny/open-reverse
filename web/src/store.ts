@@ -3,7 +3,9 @@
 import { useSyncExternalStore } from 'react';
 import {
   api,
+  type AnnotationSnapshot,
   type BinaryRecord,
+  type CallNode,
   type Decompilation,
   type DecompileOptions,
   type Discovery,
@@ -14,13 +16,17 @@ import {
   type StringItem,
   type SymbolItem,
   type TypesInfo,
+  type LibraryType,
   type Xref,
   type DataAction,
+  type DataDef,
+  type XrefDirection,
 } from './api.ts';
+import { historyFor, type UndoEntry } from './undo.ts';
 import { canon } from './util.ts';
 
 export type ViewMode = 'linear' | 'graph' | 'hex' | 'types';
-export type SidebarTab = 'functions' | 'strings' | 'symbols' | 'sections';
+export type SidebarTab = 'functions' | 'strings' | 'symbols' | 'sections' | 'calls';
 
 export interface Location {
   fnId: string | null;
@@ -44,7 +50,13 @@ export type Dialog =
   | { kind: 'renameVar'; fnId: string; valueId: string; current: string; parameter: boolean }
   /** `*`: an array of `type` at `addr`. */
   | { kind: 'array'; addr: string; type: string; current: number; max: number }
+  /** Alt+M: bookmark an address (current: its description when already bookmarked). */
+  | { kind: 'bookmark'; addr: string; current: string | null }
+  /** Ctrl+M: the bookmark list. */
+  | { kind: 'bookmarks' }
   | { kind: 'open' };
+
+export type XrefTarget = { id?: string; addr?: string };
 
 export interface Async<T> {
   status: 'idle' | 'loading' | 'ready' | 'error';
@@ -77,10 +89,19 @@ export interface State {
   comments: Record<string, string>;
   /** Bumped when data definitions or listing names change (the linear view reloads). */
   dataVersion: number;
+  bookmarks: Record<string, string>;
   selection: Selection | null;
   /** Instructions highlighted from a pseudo-code click. */
   linked: Set<string>;
-  xrefs: { title: string; status: 'loading' | 'ready' | 'error'; items: Xref[]; error: string | null } | null;
+  xrefs: {
+    target: XrefTarget;
+    /** What the target is called in the title: "Xrefs to <name>" / "Xrefs from <name>". */
+    name: string;
+    direction: XrefDirection;
+    status: 'loading' | 'ready' | 'error';
+    items: Xref[];
+    error: string | null;
+  } | null;
   dialog: Dialog | null;
   sidebarTab: SidebarTab;
   strings: Async<StringItem[]>;
@@ -123,6 +144,7 @@ let state: State = {
   decomp: idle(),
   comments: {},
   dataVersion: 0,
+  bookmarks: {},
   selection: null,
   linked: new Set(),
   xrefs: null,
@@ -236,6 +258,7 @@ export function closeBinary(): void {
     listing: idle(),
     decomp: idle(),
     comments: {},
+    bookmarks: {},
     selection: null,
     linked: new Set(),
     xrefs: null,
@@ -255,8 +278,8 @@ export async function openBinary(bid: string, at?: { addr: string | null; view: 
     if (getState().bid !== bid) return;
     setState({ info });
     await loadFunctions();
-    const { comments } = await api.comments(bid);
-    setState({ comments });
+    const [{ comments }, { bookmarks }] = await Promise.all([api.comments(bid), api.bookmarks(bid)]);
+    setState({ comments, bookmarks });
     const target = at?.addr ?? pickStart();
     if (target) await navigate(target, { view: at?.view ?? 'linear', replace: true });
     schedulePoll();
@@ -478,7 +501,7 @@ export async function loadTypes(force = false): Promise<void> {
 
 export async function loadSidebar(tab: SidebarTab): Promise<void> {
   const bid = state.bid;
-  if (!bid || tab === 'functions' || state[tab].status !== 'idle') return;
+  if (!bid || tab === 'functions' || tab === 'calls' || state[tab].status !== 'idle') return;
   setState({ [tab]: { status: 'loading', data: null, error: null } } as Partial<State>);
   try {
     const data =
@@ -491,41 +514,185 @@ export async function loadSidebar(tab: SidebarTab): Promise<void> {
 
 // ------------------------------------------------------------ annotations
 
-export async function showXrefs(target: { id?: string; addr?: string }, title: string): Promise<void> {
+export function xrefsTitle(name: string, direction: XrefDirection): string {
+  return `Xrefs ${direction === 'incoming' ? 'to' : 'from'} ${name}`;
+}
+
+export async function showXrefs(target: XrefTarget, name: string, direction: XrefDirection = 'incoming'): Promise<void> {
   const bid = state.bid;
   if (!bid) return;
-  setState({ xrefs: { title, status: 'loading', items: [], error: null } });
+  const base = { target, name, direction };
+  setState({ xrefs: { ...base, status: 'loading', items: [], error: null } });
+  const current = () => state.xrefs?.target === target && state.xrefs.direction === direction;
   try {
-    const { xrefs } = await api.xrefs(bid, target, 'incoming');
-    setState({ xrefs: { title, status: 'ready', items: xrefs, error: null } });
+    const { xrefs } = await api.xrefs(bid, target, direction);
+    if (current()) setState({ xrefs: { ...base, status: 'ready', items: xrefs, error: null } });
   } catch (e) {
-    setState({ xrefs: { title, status: 'error', items: [], error: errorText(e) } });
+    if (current()) setState({ xrefs: { ...base, status: 'error', items: [], error: errorText(e) } });
   }
 }
 
-export async function rename(target: { id?: string; addr?: string }, name: string): Promise<void> {
+/** The xrefs panel's To / From toggle: the same target, the other direction. */
+export function setXrefsDirection(direction: XrefDirection): void {
+  const x = state.xrefs;
+  if (x && x.direction !== direction) void showXrefs(x.target, x.name, direction);
+}
+
+/** Direct callers and callees of a function, per revision (the call tree expands lazily). */
+const callsCache = new Map<string, Promise<{ callers: CallNode[]; callees: CallNode[] }>>();
+
+export function loadCalls(fnId: string): Promise<{ callers: CallNode[]; callees: CallNode[] }> {
+  const { bid, revision } = state;
+  if (!bid) return Promise.reject(new Error('No binary open'));
+  const key = `${bid}|${revision}|${fnId}`;
+  let p = callsCache.get(key);
+  if (!p) {
+    for (const k of callsCache.keys()) if (!k.startsWith(`${bid}|${revision}|`)) callsCache.delete(k);
+    p = api.calls(bid, fnId);
+    callsCache.set(key, p);
+    p.catch(() => callsCache.delete(key));
+  }
+  return p;
+}
+
+// --------------------------------------------------------------- undo / redo
+// Every edit records how to restore the previous value and how to apply it again,
+// both through the same calls as the edit itself, so every view refreshes the same way.
+
+/** Records an edit made on binary `bid` (it may have been closed while the edit ran). */
+function record(bid: string, entry: UndoEntry): void {
+  if (state.bid === bid) historyFor(bid).record(entry);
+}
+
+/** Edits still being applied: undo waits for them, so it never skips the edit just made. */
+let editsInFlight: Promise<unknown> = Promise.resolve();
+
+function tracked<A extends unknown[], R>(edit: (...args: A) => Promise<R>): (...args: A) => Promise<R> {
+  return (...args) => {
+    const p = edit(...args);
+    editsInFlight = Promise.all([editsInFlight, p.catch(() => undefined)]);
+    return p;
+  };
+}
+
+/** Names this tab gave globals and variables, for undo: OpenDecomp has no read of a single annotation. */
+const knownNames = new Map<string, string>();
+
+async function undoRedo(kind: 'undo' | 'redo'): Promise<void> {
   const bid = state.bid;
   if (!bid) return;
+  await editsInFlight;
+  const h = historyFor(bid);
   try {
-    const { note } = await api.rename(bid, target, name);
-    await loadFunctions();
-    setState((s) => ({ types: idle(), dataVersion: s.dataVersion + (target.addr ? 1 : 0) }));
-    await reloadCurrent();
-    toast(`${name.trim() ? `Renamed to ${name.trim()}` : 'Name reset'}${note ? ` (${note})` : ''}`);
+    const entry = await (kind === 'undo' ? h.undo() : h.redo());
+    if (state.bid !== bid) return;
+    if (entry) toast(`${kind === 'undo' ? 'Undid' : 'Redid'} ${entry.label}`);
+    else toast(kind === 'undo' ? 'Nothing to undo' : 'Nothing to redo');
   } catch (e) {
-    toast(errorText(e), 'error');
+    if (state.bid === bid) toast(`Could not ${kind}: ${errorText(e)}`, 'error');
   }
 }
 
-export async function setComment(addr: string, text: string): Promise<void> {
-  const bid = state.bid;
+/** Ctrl+Z */
+export const undo = () => undoRedo('undo');
+/** Ctrl+Shift+Z, Ctrl+Y */
+export const redo = () => undoRedo('redo');
+
+async function snapshot(fnId: string): Promise<AnnotationSnapshot> {
+  return (await api.annotationSnapshot(state.bid!, fnId)).snapshot;
+}
+
+async function restore(fnId: string, snap: AnnotationSnapshot): Promise<void> {
+  await api.restoreAnnotations(state.bid!, fnId, snap);
+  await refreshAfterAnnotation();
+}
+
+async function applyRename(target: XrefTarget, name: string): Promise<string | null> {
+  const { note } = await api.rename(state.bid!, target, name);
+  if (target.addr) {
+    knownNames.set(`${state.bid}|va:${target.addr}`, name.trim());
+    // A global's name is also a label of the whole-image listing.
+    setState((s) => ({ dataVersion: s.dataVersion + 1 }));
+  }
+  await refreshAfterAnnotation();
+  return note;
+}
+
+export const rename = tracked(async (target: XrefTarget, name: string): Promise<void> => {
+  const { bid, byId } = state;
   if (!bid) return;
   try {
-    const { comments } = await api.comment(bid, addr, text);
-    setState({ comments });
+    const fn = target.id ? byId.get(target.id) : undefined;
+    const label = `rename of ${fn?.name ?? target.addr ?? 'symbol'}`;
+    if (fn) {
+      // A function's name may also come from its signature: restore exactly what was stored.
+      const before = await snapshot(fn.id);
+      await applyRename(target, name);
+      const after = await snapshot(fn.id);
+      if (JSON.stringify(before) !== JSON.stringify(after)) record(bid, { label, undo: () => restore(fn.id, before), redo: () => restore(fn.id, after) });
+    } else {
+      const previous = (target.addr && knownNames.get(`${bid}|va:${target.addr}`)) || '';
+      const note = await applyRename(target, name);
+      if (previous !== name.trim())
+        record(bid, { label, undo: async () => void (await applyRename(target, previous)), redo: async () => void (await applyRename(target, name)) });
+      if (note) return toast(`Renamed to ${name.trim()} (${note})`);
+    }
+    toast(name.trim() ? `Renamed to ${name.trim()}` : 'Name reset');
   } catch (e) {
     toast(errorText(e), 'error');
   }
+});
+
+async function applyComment(addr: string, text: string): Promise<void> {
+  const { comments } = await api.comment(state.bid!, addr, text);
+  setState({ comments });
+}
+
+export const setComment = tracked(async (addr: string, text: string): Promise<void> => {
+  const bid = state.bid;
+  if (!bid) return;
+  const previous = state.comments[addr] ?? '';
+  try {
+    await applyComment(addr, text);
+    if (previous.trim() !== text.trim())
+      record(bid, { label: `comment at ${addr}`, undo: () => applyComment(addr, previous), redo: () => applyComment(addr, text) });
+  } catch (e) {
+    toast(errorText(e), 'error');
+  }
+});
+
+// ---------------------------------------------------------------- bookmarks
+
+async function applyBookmark(addr: string, description: string | null): Promise<void> {
+  const { bookmarks } = await api.bookmark(state.bid!, addr, description);
+  setState({ bookmarks });
+}
+
+/** Bookmarks an address (Alt+M); null removes the bookmark. */
+export const setBookmark = tracked(async (addr: string, description: string | null): Promise<void> => {
+  const bid = state.bid;
+  if (!bid) return;
+  const previous = state.bookmarks[addr] ?? null;
+  const next = description === null ? null : description.trim();
+  try {
+    await applyBookmark(addr, next);
+    if (previous !== next)
+      record(bid, {
+        label: next === null ? `bookmark removal at ${addr}` : `bookmark at ${addr}`,
+        undo: () => applyBookmark(addr, previous),
+        redo: () => applyBookmark(addr, next),
+      });
+    toast(next === null ? `Bookmark at ${addr} removed` : `Bookmarked ${addr}`);
+  } catch (e) {
+    toast(errorText(e), 'error');
+  }
+});
+
+/** Alt+M: bookmark the cursor's address. */
+export function beginBookmark(): void {
+  const addr = state.loc?.addr;
+  if (!addr) return;
+  setState({ dialog: { kind: 'bookmark', addr, current: state.bookmarks[addr] ?? null } });
 }
 
 /** The rename dialog for the current selection (N). */
@@ -540,6 +707,9 @@ export function beginRename(): void {
   else if (selection?.kind === 'addr') {
     fn = byEntry.get(selection.addr);
     if (!fn && !listing.data?.instructions.some((i) => i.addr === selection.addr)) {
+      // The label shown is the name an undo of this rename goes back to.
+      const known = `${state.bid}|va:${selection.addr}`;
+      if (selection.name && !knownNames.has(known)) knownNames.set(known, selection.name);
       setState({ dialog: { kind: 'rename', target: { addr: selection.addr }, current: selection.name ?? '', what: `global at ${selection.addr}` } });
       return;
     }
@@ -553,21 +723,30 @@ export function beginRename(): void {
  * Xrefs (X) to the selected operand or comment target; else, on a disassembly line,
  * to what that line references (a call target, a string, a resolved ADRP pair...) or,
  * referencing nothing, to the line itself (jumps to it); else to the current function.
+ * Xrefs from (Shift+X): from the selected function or address, else from the cursor's
+ * line, else from the current function.
  */
-export function beginXrefs(): void {
+export function beginXrefs(direction: XrefDirection = 'incoming'): void {
+  const t = xrefTarget(direction);
+  if (t) void showXrefs(t.target, t.name, direction);
+}
+
+function xrefTarget(direction: XrefDirection): { target: XrefTarget; name: string } | null {
   const { selection, byId, byEntry, loc, listing } = state;
+  const fnTarget = (f: FunctionSummary) => ({ target: { id: f.id }, name: f.name });
   if (selection?.kind === 'function') {
     const f = byId.get(selection.fnId);
-    if (f) return void showXrefs({ id: f.id }, `Xrefs to ${f.name}`);
+    if (f) return fnTarget(f);
   }
   if (selection?.kind === 'addr') {
     const f = byEntry.get(selection.addr);
-    if (f) return void showXrefs({ id: f.id }, `Xrefs to ${f.name}`);
-    return void showXrefs({ addr: selection.addr }, `Xrefs to ${selection.name ?? selection.addr}`);
+    if (f) return fnTarget(f);
+    return { target: { addr: selection.addr }, name: selection.name ?? selection.addr };
   }
   const insns = listing.data?.instructions ?? [];
   const insn = loc && (loc.view === 'linear' || loc.view === 'graph') ? insns.find((i) => i.addr === loc.addr) : undefined;
   if (insn && !byEntry.has(insn.addr)) {
+    if (direction === 'outgoing') return { target: { addr: insn.addr }, name: insn.addr };
     const local = new Set(insns.map((i) => i.addr));
     // An ADRP operand is a 4 KiB page base, not what the code refers to (that is resolved with its ADD/LDR).
     const page = /^adrp?$/i.test(insn.mnemonic);
@@ -580,33 +759,52 @@ export function beginXrefs(): void {
         : null;
     if (target) {
       const f = target.kind === 'function' ? byEntry.get(target.addr) : undefined;
-      if (f) return void showXrefs({ id: f.id }, `Xrefs to ${f.name}`);
-      return void showXrefs({ addr: target.addr }, `Xrefs to ${target.label || target.addr}`);
+      return f ? fnTarget(f) : { target: { addr: target.addr }, name: target.label || target.addr };
     }
-    return void showXrefs({ addr: insn.addr }, `Xrefs to ${insn.addr}`);
+    return { target: { addr: insn.addr }, name: insn.addr };
   }
   const f = loc?.fnId ? byId.get(loc.fnId) : undefined;
-  if (f) void showXrefs({ id: f.id }, `Xrefs to ${f.name}`);
+  return f ? fnTarget(f) : null;
 }
 
 // ------------------------------------------------------------ data (D A O * U)
 
 /** Applies a data key at the cursor (D cycles byte/word/dword/qword, A string, O pointer, U undefine). */
-export async function defineData(action: DataAction, count?: number, at?: string): Promise<void> {
+const defText = (d: DataDef | null) => (d ? (d.type === 'string' ? `string (${d.count} bytes)` : d.count > 1 ? `${d.type}[${d.count}]` : d.type) : 'undefined');
+
+/** After a data definition change: the listing reloads; a new revision refreshes every view. */
+async function afterData(before: number, revision: number): Promise<void> {
+  setState((s) => ({ dataVersion: s.dataVersion + 1 }));
+  if (revision !== before) await refreshAfterAnnotation();
+}
+
+/** Puts back the definitions of [start, end) (undo/redo of a data key). */
+async function applyData(range: { start: string; end: string }, defs: Record<string, DataDef>): Promise<void> {
+  const before = state.revision;
+  const r = await api.restoreData(state.bid!, range.start, range.end, defs);
+  await afterData(before, r.revision);
+}
+
+/** Applies a data key at the cursor (D cycles byte/word/dword/qword, A string, O pointer, * array, U undefine). */
+export const defineData = tracked(async (action: DataAction, count?: number, at?: string): Promise<void> => {
   const { bid, loc } = state;
   const addr = at ?? loc?.addr;
   if (!bid || !addr) return;
   try {
     const before = state.revision;
     const r = await api.defineData(bid, addr, action, count);
-    setState((s) => ({ dataVersion: s.dataVersion + 1 }));
-    if (r.revision !== before) await refreshAfterAnnotation();
-    const what = r.def ? (r.def.type === 'string' ? `string (${r.def.count} bytes)` : r.def.count > 1 ? `${r.def.type}[${r.def.count}]` : r.def.type) : 'undefined';
-    toast(`${r.start}: ${what}${r.note ? ` — ${r.note}` : ''}`, r.note ? 'error' : 'info');
+    await afterData(before, r.revision);
+    const after = r.def ? { [r.start]: r.def } : {};
+    record(bid, {
+      label: `${defText(r.def)} at ${r.start}`,
+      undo: () => applyData(r.range, r.replaced),
+      redo: () => applyData(r.range, after),
+    });
+    toast(`${r.start}: ${defText(r.def)}${r.note ? ` — ${r.note}` : ''}`, r.note ? 'error' : 'info');
   } catch (e) {
     toast(errorText(e), 'error');
   }
-}
+});
 
 /** `*`: asks how many elements the array at the cursor has. */
 export async function beginArray(): Promise<void> {
@@ -645,31 +843,73 @@ async function refreshAfterAnnotation(): Promise<void> {
   await reloadCurrent();
 }
 
+async function applyDeclare(source: string): Promise<Record<string, string>> {
+  const { annotations } = await api.declareTypes(state.bid!, source);
+  await refreshAfterAnnotation();
+  return annotations;
+}
+
+async function applyRemoveTypes(annotationIds: string[]): Promise<void> {
+  await api.removeLibraryTypes(state.bid!, annotationIds);
+  await refreshAfterAnnotation();
+}
+
+/** The type library as it is now (the Types view usually has it loaded already). */
+async function currentLibrary(): Promise<LibraryType[]> {
+  const t = state.types;
+  return t.status === 'ready' && t.data ? t.data.library : (await api.types(state.bid!)).library;
+}
+
 /** Declares C types in the image's type library. Resolves to the error text, or null on success. */
-export async function declareTypes(source: string): Promise<string | null> {
+export const declareTypes = tracked(async (source: string): Promise<string | null> => {
   const bid = state.bid;
   if (!bid) return 'No binary open';
   try {
-    const { declared } = await api.declareTypes(bid, source);
-    await refreshAfterAnnotation();
+    const before = new Map((await currentLibrary()).flatMap((t) => (t.name ? [[t.name, t.declaration] as const] : [])));
+    let annotations = await applyDeclare(source);
+    const declared = Object.keys(annotations);
     toast(declared.length ? `Declared ${declared.join(', ')}` : 'Types declared');
+    // Undo puts back the previous declaration of each redeclared name and removes the new
+    // names (their pointer helper types stay, as when a declaration is deleted).
+    record(bid, {
+      label: `declaration of ${declared.join(', ') || 'types'}`,
+      undo: async () => {
+        const added = declared.filter((n) => !before.has(n)).map((n) => annotations[n]!);
+        const previous = declared.flatMap((n) => (before.has(n) ? [before.get(n)!] : []));
+        if (added.length) await applyRemoveTypes(added);
+        if (previous.length) await applyDeclare(previous.join('\n'));
+      },
+      redo: async () => {
+        annotations = await applyDeclare(source);
+      },
+    });
     return null;
   } catch (e) {
     return errorText(e);
   }
-}
+});
 
-export async function removeLibraryType(annotationId: string, name: string): Promise<void> {
+export const removeLibraryType = tracked(async (t: LibraryType): Promise<void> => {
   const bid = state.bid;
   if (!bid) return;
+  const name = t.name ?? t.typeId;
+  let id = t.annotationId;
   try {
-    await api.removeLibraryType(bid, annotationId);
-    await refreshAfterAnnotation();
+    await applyRemoveTypes([id]);
     toast(`Removed ${name} from the type library`);
+    // Undo declares it again: the same name keeps its type ID, so signatures using it bind again.
+    record(bid, {
+      label: `deletion of ${name}`,
+      undo: async () => {
+        const annotations = await applyDeclare(t.declaration);
+        id = (t.name && annotations[t.name]) || id;
+      },
+      redo: () => applyRemoveTypes([id]),
+    });
   } catch (e) {
     toast(errorText(e), 'error');
   }
-}
+});
 
 /** The signature dialog (Y) for the selected call target, else the current function. */
 export async function beginSignature(): Promise<void> {
@@ -685,12 +925,17 @@ export async function beginSignature(): Promise<void> {
 }
 
 /** Applies a C prototype to a function (empty removes it). Resolves to the error text, or null. */
-export async function setSignature(fnId: string, text: string): Promise<string | null> {
+export const setSignature = tracked(async (fnId: string, text: string): Promise<string | null> => {
   const bid = state.bid;
   if (!bid) return 'No binary open';
   try {
+    const name = state.byId.get(fnId)?.name ?? fnId;
+    const before = await snapshot(fnId);
     const { confirmed } = await api.setSignature(bid, fnId, text);
     await refreshAfterAnnotation();
+    const after = await snapshot(fnId);
+    if (JSON.stringify(before) !== JSON.stringify(after))
+      record(bid, { label: `signature of ${name}`, undo: () => restore(fnId, before), redo: () => restore(fnId, after) });
     if (!text.trim()) toast('Signature removed');
     else if (confirmed) toast('Signature applied');
     else
@@ -702,17 +947,32 @@ export async function setSignature(fnId: string, text: string): Promise<string |
   } catch (e) {
     return errorText(e);
   }
+});
+
+async function applyRenameVariable(fnId: string, valueId: string, name: string): Promise<void> {
+  await api.renameVariable(state.bid!, fnId, valueId, name, state.options);
+  knownNames.set(`${state.bid}|value:${valueId}`, name.trim());
+  await refreshAfterAnnotation();
 }
 
-/** Renames a parameter or local (empty restores the generated name). */
-export async function renameVariable(fnId: string, valueId: string, name: string): Promise<void> {
+/**
+ * Renames a parameter or local (empty restores the generated name). `current` is the name
+ * the pseudocode shows: undo gives it back (as a name annotation when it was generated).
+ */
+export const renameVariable = tracked(async (fnId: string, valueId: string, name: string, current: string): Promise<void> => {
   const bid = state.bid;
   if (!bid) return;
   try {
-    await api.renameVariable(bid, fnId, valueId, name, state.options);
-    await refreshAfterAnnotation();
+    const previous = knownNames.get(`${bid}|value:${valueId}`) ?? current;
+    await applyRenameVariable(fnId, valueId, name);
+    if (previous !== name.trim())
+      record(bid, {
+        label: `rename of ${current}`,
+        undo: () => applyRenameVariable(fnId, valueId, previous),
+        redo: () => applyRenameVariable(fnId, valueId, name),
+      });
     toast(name.trim() ? `Renamed to ${name.trim()}` : 'Name reset');
   } catch (e) {
     toast(errorText(e), 'error');
   }
-}
+});

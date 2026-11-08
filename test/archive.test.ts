@@ -149,6 +149,43 @@ describe('project archive', () => {
       await assert.rejects(decodeProjectArchive(await mutate(v2, (es) => (es.find((e) => e.path === 'data.json')!.data = enc.encode(bad)))), ArchiveError, bad);
   });
 
+  test('bookmarks: version 2 with bookmarks.json, version 1 without', async () => {
+    const version = async (bytes: Uint8Array) =>
+      JSON.parse(new TextDecoder().decode((await zipDecode(bytes)).find((e) => e.path === ARCHIVE_MANIFEST)!.data)).version;
+    const plain = await encodeProjectArchive(sample());
+    assert.equal(await version(plain), 1);
+    assert.ok(!(await zipDecode(plain)).some((e) => e.path === 'bookmarks.json'));
+    assert.deepEqual((await decodeProjectArchive(plain)).bookmarks, {});
+    const marked = await encodeProjectArchive({ ...sample(), bookmarks: { '0x401000': 'start here', '0x401010': '' } });
+    assert.equal(await version(marked), 2);
+    assert.deepEqual((await decodeProjectArchive(marked)).bookmarks, { '0x401000': 'start here', '0x401010': '' });
+    await assert.rejects(
+      decodeProjectArchive(await mutate(marked, (es) => (es.find((e) => e.path === 'bookmarks.json')!.data = enc.encode('{"0x1":5}')))),
+      /Invalid bookmark at 0x1/,
+    );
+    await assert.rejects(
+      decodeProjectArchive(await mutate(marked, (es) => (es.find((e) => e.path === 'bookmarks.json')!.data = enc.encode('[]')))),
+      /bookmarks.json must be an object/,
+    );
+  });
+
+  test('version 2 with bookmarks and data definitions together; bookmarks.json is a version 2 entry', async () => {
+    const data = { defs: { '0x402000': { type: 'ptr' as const, count: 1 } }, names: {} };
+    const bytes = await encodeProjectArchive({ ...sample(), bookmarks: { '0x401000': 'entry' }, data });
+    const entries = await zipDecode(bytes);
+    assert.equal(JSON.parse(new TextDecoder().decode(entries.find((e) => e.path === ARCHIVE_MANIFEST)!.data)).version, 2);
+    assert.ok(entries.some((e) => e.path === 'bookmarks.json') && entries.some((e) => e.path === 'data.json'));
+    const back = await decodeProjectArchive(bytes);
+    assert.deepEqual(back.bookmarks, { '0x401000': 'entry' });
+    assert.deepEqual(back.data, data);
+    const asV1 = await mutate(bytes, (es) => {
+      es.splice(es.findIndex((e) => e.path === 'data.json'), 1);
+      const e = es.find((x) => x.path === ARCHIVE_MANIFEST)!;
+      e.data = enc.encode(JSON.stringify({ ...JSON.parse(new TextDecoder().decode(e.data)), version: 1 }));
+    });
+    await assert.rejects(decodeProjectArchive(asV1), /Unexpected entry in archive: "bookmarks.json"/);
+  });
+
   test('refuses to encode unsafe project paths', async () => {
     const a = sample();
     a.project.set('../escape', new Uint8Array(1));

@@ -3,10 +3,11 @@
 
 import { ArchiveError, archiveFileName, decodeProjectArchive, encodeProjectArchive } from './archive.ts';
 import { canon, parseAddress } from './hex.ts';
-import { AnalysisSession, ApiError, type DataAction } from './session.ts';
+import { AnalysisSession, ApiError, type AnnotationSnapshot, type DataAction } from './session.ts';
 import { vfs } from './vfs.ts';
 import type { TaskContext } from './tasks.ts';
 import { exportPseudocode, snapshotProject, storageUsage } from './transfer.ts';
+import type { DataDef } from './linear.ts';
 import { Workspace, type BinaryRecord } from './workspace.ts';
 
 type Target = { id?: string; addr?: string };
@@ -137,7 +138,7 @@ export class Engine {
     ctx.signal.throwIfAborted();
     ctx.progress({ phase: 'write', done: 0, total: null });
     if (existing) await this.remove(record.id);
-    await this.workspace.restore(record, archive.binary, archive.comments, archive.project, archive.data);
+    await this.workspace.restore(record, archive.binary, archive.comments, archive.project, archive.bookmarks, archive.data);
     await this.workspace.unload(record.id);
     return { status: 'imported', record, replaced: !!existing };
   }
@@ -155,7 +156,7 @@ export class Engine {
 
   /**
    * Delete a binary's OpenDecomp project directory: the analysis cache and the
-   * annotations stored in it (renames). The binary and comments stay; the
+   * annotations stored in it (renames). The binary, comments and bookmarks stay; the
    * next open re-imports the binary into a fresh project.
    */
   async resetProject(bid: string): Promise<{ ok: true }> {
@@ -206,12 +207,24 @@ export class Engine {
     return result;
   }
 
+  /** Undo/redo of data definitions: those overlapping [start, end) become exactly `defs`. */
+  async restoreData(bid: string, start: string, end: string, defs: Record<string, DataDef>) {
+    if (!defs || typeof defs !== 'object') throw new ApiError(400, 'Missing definitions');
+    const result = await (await this.#session(bid)).restoreData(addr(start, 'start'), addr(end, 'end'), defs);
+    void vfs.flush();
+    return result;
+  }
+
   async decompile(bid: string, fid: string, options: DecompileOptions, signal?: AbortSignal) {
     const s = await this.#session(bid);
     // OpenDecomp cancels a running job by restarting the project owner. With helper
     // workers the owner is not blocked, so a decompile the UI navigated away from just
     // finishes in the background (and fills the cache) instead.
     return s.decompile(fid, options, s.threads > 1 ? undefined : signal);
+  }
+
+  async calls(bid: string, fid: string) {
+    return (await this.#session(bid)).calls(fid);
   }
 
   async xrefs(bid: string, target: Target, direction: 'incoming' | 'outgoing' | 'both' = 'incoming') {
@@ -264,8 +277,21 @@ export class Engine {
     return result;
   }
 
-  async removeLibraryType(bid: string, annotationId: string) {
-    const result = await (await this.#session(bid)).removeLibraryType(String(annotationId));
+  async removeLibraryTypes(bid: string, annotationIds: string[]) {
+    if (!Array.isArray(annotationIds)) throw new ApiError(400, 'Missing annotation ids');
+    const result = await (await this.#session(bid)).removeLibraryTypes(annotationIds.map(String));
+    void vfs.flush();
+    return result;
+  }
+
+  /** This app's annotations on a function, for undo. */
+  async annotationSnapshot(bid: string, fid: string) {
+    return { snapshot: await (await this.#session(bid)).annotationSnapshot(fid) };
+  }
+
+  async restoreAnnotations(bid: string, fid: string, snapshot: AnnotationSnapshot) {
+    if (!Array.isArray(snapshot)) throw new ApiError(400, 'Missing snapshot');
+    const result = await (await this.#session(bid)).restoreAnnotations(fid, snapshot);
     void vfs.flush();
     return result;
   }
@@ -292,5 +318,16 @@ export class Engine {
     const comments = await (await this.#session(bid)).comment(addr(a), String(text ?? ''));
     void vfs.flush();
     return { comments };
+  }
+
+  async bookmarks(bid: string) {
+    return { bookmarks: await (await this.#session(bid)).bookmarks() };
+  }
+
+  /** Bookmark an address (description may be empty); null removes it. */
+  async bookmark(bid: string, a: string, description: string | null) {
+    const bookmarks = await (await this.#session(bid)).bookmark(addr(a), description === null ? null : String(description));
+    void vfs.flush();
+    return { bookmarks };
   }
 }

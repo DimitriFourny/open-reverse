@@ -2,6 +2,7 @@ import { useVirtualizer } from '@tanstack/react-virtual';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { loadSidebar, navigate, setState, showXrefs, useStore, type SidebarTab } from '../store.ts';
 import { cmpAddr, padAddr } from '../util.ts';
+import { CallTree } from './CallTree.tsx';
 
 const ROW_H = 22;
 
@@ -74,6 +75,7 @@ export function Sidebar() {
 
   const f = filter.trim().toLowerCase();
   const items: Item[] = useMemo(() => {
+    if (tab === 'calls') return [];
     if (tab === 'functions') {
       const list = functions.filter((fn) => !f || fn.name.toLowerCase().includes(f) || fn.entry.includes(f) || fn.originalName?.toLowerCase().includes(f));
       const sorted = [...list].sort((a, b) => (sort === 'name' ? a.name.localeCompare(b.name) : sort === 'size' ? b.size - a.size : cmpAddr(a.entry, b.entry)));
@@ -85,7 +87,7 @@ export function Sidebar() {
         cls: fn.importStub ? 'stub' : fn.renamed ? 'renamed' : fn.originalName ? '' : 'unnamed',
         title: `${fn.name} @ ${fn.entry} · ${fn.size} bytes · ${fn.boundary}${fn.importStub ? ' · import stub' : ''}${fn.renamed ? ` · originally ${fn.originalName ?? 'unnamed'}` : ''}`,
         onOpen: () => void navigate(fn.entry, { fnId: fn.id }),
-        onXrefs: () => void showXrefs({ id: fn.id }, `Xrefs to ${fn.name}`),
+        onXrefs: () => void showXrefs({ id: fn.id }, fn.name),
       }));
     }
     if (tab === 'strings')
@@ -97,7 +99,7 @@ export function Sidebar() {
           secondary: padAddr(s.addr),
           addr: s.addr,
           title: `${s.addr} (${s.encoding}) — click: xrefs · right-click: go to`,
-          onOpen: () => void showXrefs({ addr: s.addr }, `Xrefs to "${s.text.slice(0, 40)}"`),
+          onOpen: () => void showXrefs({ addr: s.addr }, JSON.stringify(s.text.slice(0, 40))),
           onXrefs: () => void navigate(s.addr),
         }));
     if (tab === 'symbols')
@@ -128,7 +130,7 @@ export function Sidebar() {
       }));
   }, [tab, functions, strings.data, symbols.data, sections.data, f, sort]);
 
-  const state = tab === 'functions' ? null : tab === 'strings' ? strings : tab === 'symbols' ? symbols : sections;
+  const state = tab === 'functions' || tab === 'calls' ? null : tab === 'strings' ? strings : tab === 'symbols' ? symbols : sections;
   const activeKey = tab === 'functions' ? (loc?.fnId ?? null) : null;
 
   const tabs: [SidebarTab, string][] = [
@@ -136,6 +138,7 @@ export function Sidebar() {
     ['strings', 'Strings'],
     ['symbols', 'Symbols'],
     ['sections', 'Sections'],
+    ['calls', 'Calls'],
   ];
   return (
     <div className="sidebar">
@@ -146,6 +149,10 @@ export function Sidebar() {
           </button>
         ))}
       </div>
+      {tab === 'calls' ? (
+        <CallTree />
+      ) : (
+      <>
       <div className="side-filter">
         <input placeholder={`Filter ${tab}…`} value={filter} onChange={(e) => setFilter(e.target.value)} spellCheck={false} />
         {tab === 'functions' && (
@@ -165,6 +172,8 @@ export function Sidebar() {
       {state && state.status === 'loading' && <div className="placeholder">Loading…</div>}
       {state && state.status === 'error' && <div className="placeholder error">{state.error}</div>}
       <VList items={items} activeKey={activeKey} />
+      </>
+      )}
     </div>
   );
 }

@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { defineData, loadSidebar, navigate, rename, renameVariable, setComment, setSignature, setState, toast, useStore, type Dialog } from '../store.ts';
-import { padAddr, parseAddress } from '../util.ts';
+import { defineData, loadSidebar, navigate, rename, renameVariable, setBookmark, setComment, setSignature, setState, toast, useStore, type Dialog } from '../store.ts';
+import { cmpAddr, functionOffset, padAddr, parseAddress } from '../util.ts';
 
 function Modal({ title, children, onClose }: { title: string; children: React.ReactNode; onClose: () => void }) {
   return (
@@ -94,7 +94,22 @@ function GotoDialog() {
   );
 }
 
-function TextDialog({ title, initial, hint, multiline, onSubmit }: { title: string; initial: string; hint: string; multiline?: boolean; onSubmit: (v: string) => void }) {
+function TextDialog({
+  title,
+  initial,
+  hint,
+  multiline,
+  extra,
+  onSubmit,
+}: {
+  title: string;
+  initial: string;
+  hint: string;
+  multiline?: boolean;
+  /** More footer buttons, before Cancel. */
+  extra?: React.ReactNode;
+  onSubmit: (v: string) => void;
+}) {
   const [text, setText] = useState(initial);
   const ref = useRef<HTMLInputElement & HTMLTextAreaElement>(null);
   useEffect(() => {
@@ -114,6 +129,7 @@ function TextDialog({ title, initial, hint, multiline, onSubmit }: { title: stri
       )}
       <div className="modal-foot">
         <span className="dim">{hint}</span>
+        {extra}
         <button onClick={close}>Cancel</button>
         <button className="primary" onClick={submit}>OK</button>
       </div>
@@ -188,7 +204,7 @@ export function Dialogs() {
         title={`Rename ${dialog.parameter ? 'parameter' : 'local'} ${dialog.current}`}
         initial={dialog.current}
         hint="Empty restores the generated name. Stored as an OpenDecomp name annotation on the value."
-        onSubmit={(v) => void renameVariable(dialog.fnId, dialog.valueId, v)}
+        onSubmit={(v) => void renameVariable(dialog.fnId, dialog.valueId, v, dialog.current)}
       />
     );
   if (dialog.kind === 'array')
@@ -206,5 +222,101 @@ export function Dialogs() {
     );
   if (dialog.kind === 'comment')
     return <TextDialog title={`Comment at ${dialog.addr}`} initial={dialog.current} hint="Empty removes the comment." multiline onSubmit={(v) => void setComment(dialog.addr, v)} />;
+  if (dialog.kind === 'bookmark')
+    return (
+      <TextDialog
+        title={`${dialog.current === null ? 'Bookmark' : 'Edit bookmark at'} ${dialog.addr}`}
+        initial={dialog.current ?? ''}
+        hint="Description (optional). Ctrl+M lists bookmarks."
+        extra={
+          dialog.current !== null && (
+            <button onClick={() => (close(), void setBookmark(dialog.addr, null))} title="Remove this bookmark">
+              Remove
+            </button>
+          )
+        }
+        onSubmit={(v) => void setBookmark(dialog.addr, v)}
+      />
+    );
+  if (dialog.kind === 'bookmarks') return <BookmarksDialog />;
   return null;
+}
+
+/** Ctrl+M: every bookmark of the binary; Enter or click jumps, Delete removes. */
+function BookmarksDialog() {
+  const bookmarks = useStore((s) => s.bookmarks);
+  const functions = useStore((s) => s.functions);
+  const [text, setText] = useState('');
+  const [sel, setSel] = useState(0);
+  const inputRef = useRef<HTMLInputElement>(null);
+  useEffect(() => inputRef.current?.focus(), []);
+  const byEntry = useMemo(() => [...functions].sort((a, b) => cmpAddr(a.entry, b.entry)), [functions]);
+  const rows = useMemo(() => {
+    const t = text.trim().toLowerCase();
+    return Object.entries(bookmarks)
+      .map(([addr, description]) => ({ addr, description, where: functionOffset(byEntry, addr) ?? '' }))
+      .filter((r) => !t || r.addr.includes(t) || r.description.toLowerCase().includes(t) || r.where.toLowerCase().includes(t))
+      .sort((a, b) => cmpAddr(a.addr, b.addr));
+  }, [bookmarks, byEntry, text]);
+  const current = Math.min(sel, rows.length - 1);
+  const go = (i: number) => {
+    const r = rows[i];
+    if (!r) return;
+    close();
+    void navigate(r.addr);
+  };
+  const remove = (i: number) => {
+    const r = rows[i];
+    if (r) void setBookmark(r.addr, null);
+    inputRef.current?.focus(); // keys keep working after a click on ×
+  };
+  return (
+    <Modal title="Bookmarks" onClose={close}>
+      <input
+        ref={inputRef}
+        className="modal-input"
+        value={text}
+        placeholder="Filter by address, function or description…"
+        spellCheck={false}
+        onChange={(e) => {
+          setText(e.target.value);
+          setSel(0);
+        }}
+        onKeyDown={(e) => {
+          if (e.key === 'ArrowDown') (e.preventDefault(), setSel(Math.min(current + 1, rows.length - 1)));
+          else if (e.key === 'ArrowUp') (e.preventDefault(), setSel(Math.max(current - 1, 0)));
+          else if (e.key === 'Enter') go(current);
+          else if (e.key === 'Delete' && current >= 0) (e.preventDefault(), remove(current));
+        }}
+      />
+      <div className="goto-list bookmark-list">
+        {rows.length === 0 && (
+          <div className="goto-hint dim">{Object.keys(bookmarks).length ? 'No bookmark matches.' : 'No bookmarks yet: Alt+M bookmarks the cursor.'}</div>
+        )}
+        {rows.map((r, i) => (
+          <div key={r.addr} className={`goto-item bookmark-item${i === current ? ' active' : ''}`} onMouseEnter={() => setSel(i)} onClick={() => go(i)}>
+            <span className="addr">{padAddr(r.addr)}</span>
+            <span className="bookmark-where">{r.where}</span>
+            <span className="bookmark-desc">{r.description}</span>
+            <button
+              className="close"
+              title="Remove bookmark (Delete)"
+              onClick={(e) => {
+                e.stopPropagation();
+                remove(i);
+              }}
+            >
+              ×
+            </button>
+          </div>
+        ))}
+      </div>
+      <div className="modal-foot">
+        <span className="dim">
+          {Object.keys(bookmarks).length} bookmark{Object.keys(bookmarks).length === 1 ? '' : 's'} · Enter: go · Delete: remove · Alt+M: bookmark the cursor
+        </span>
+        <button onClick={close}>Close</button>
+      </div>
+    </Modal>
+  );
 }
