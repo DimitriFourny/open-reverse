@@ -26,6 +26,12 @@ function addr(value: string | undefined, name = 'addr'): string {
 export class Engine {
   readonly workspace = new Workspace();
   readonly #sessions = new Map<string, Promise<AnalysisSession>>();
+  /** Closes in progress: opening the binary again waits for its close (one owner per project). */
+  readonly #closing = new Map<string, Promise<void>>();
+  /** Exports running per binary: closing the binary waits for them. */
+  readonly #tasks = new Map<string, Set<Promise<unknown>>>();
+  /** `info` calls per binary (the UI opening it): a close that waited skips a binary opened again. */
+  readonly #opens = new Map<string, number>();
 
   async init(): Promise<void> {
     await this.workspace.init();
@@ -55,7 +61,9 @@ export class Engine {
   #session(id: string, threads = this.threads): Promise<AnalysisSession> {
     let s = this.#sessions.get(id);
     if (!s) {
+      const closing = this.#closing.get(id);
       s = (async () => {
+        await closing;
         const record = this.workspace.get(id);
         if (!record) throw new ApiError(404, `Unknown binary ${id}`);
         await this.workspace.load(id);
@@ -67,11 +75,37 @@ export class Engine {
     return s;
   }
 
-  async #closeSession(id: string): Promise<void> {
+  async #closeSession(id: string, unload = false): Promise<void> {
+    await this.#closing.get(id);
     const s = this.#sessions.get(id);
-    if (!s) return;
+    if (!s && !unload) return;
     this.#sessions.delete(id);
-    await (await s.catch(() => null))?.close();
+    const done = (async () => {
+      await (await s?.catch(() => null))?.close();
+      if (!unload) return;
+      await vfs.flush();
+      await this.workspace.unload(id);
+    })();
+    this.#closing.set(id, done);
+    try {
+      await done;
+    } finally {
+      if (this.#closing.get(id) === done) this.#closing.delete(id);
+    }
+  }
+
+  /** Runs a long task on a binary (an export); closing the binary waits for it. */
+  async #task<T>(bid: string, fn: () => Promise<T>): Promise<T> {
+    const p = fn();
+    let set = this.#tasks.get(bid);
+    if (!set) this.#tasks.set(bid, (set = new Set()));
+    set.add(p);
+    try {
+      return await p;
+    } finally {
+      set.delete(p);
+      if (!set.size) this.#tasks.delete(bid);
+    }
   }
 
   // ------------------------------------------------------------ binaries
@@ -91,10 +125,19 @@ export class Engine {
     return { ok: true };
   }
 
+  /**
+   * The UI left the binary: stop its OpenDecomp project (owner and request workers) and drop
+   * its files from memory. An export still running on it finishes first, and a binary opened
+   * again meanwhile stays open.
+   */
   async close(bid: string): Promise<{ ok: true }> {
-    await this.#closeSession(bid);
-    await vfs.flush();
-    await this.workspace.unload(bid);
+    const tasks = this.#tasks.get(bid);
+    if (tasks) {
+      const opens = this.#opens.get(bid);
+      await Promise.allSettled([...tasks]);
+      if (this.#opens.get(bid) !== opens || this.#tasks.has(bid)) return { ok: true };
+    }
+    await this.#closeSession(bid, true);
     return { ok: true };
   }
 
@@ -113,7 +156,11 @@ export class Engine {
   // ------------------------------------------- data in / out, storage
 
   /** A project archive (see archive.ts). Works whether or not the binary is open. */
-  async exportArchive(bid: string, ctx: TaskContext): Promise<{ name: string; bytes: Uint8Array }> {
+  exportArchive(bid: string, ctx: TaskContext): Promise<{ name: string; bytes: Uint8Array }> {
+    return this.#task(bid, () => this.#exportArchive(bid, ctx));
+  }
+
+  async #exportArchive(bid: string, ctx: TaskContext): Promise<{ name: string; bytes: Uint8Array }> {
     const record = this.workspace.get(bid);
     if (!record) throw new ApiError(404, `Unknown binary ${bid}`);
     const wasLoaded = vfs.isMounted(this.workspace.dir(bid));
@@ -156,7 +203,7 @@ export class Engine {
   async exportPseudocode(bid: string, options: { language: 'c-like' | 'python-like'; inference: 'proven' | 'likely' }, ctx: TaskContext) {
     const language = options?.language === 'python-like' ? 'python-like' : 'c-like';
     const inference = options?.inference === 'likely' ? 'likely' : 'proven';
-    return exportPseudocode(await this.#session(bid), { language, inference }, ctx);
+    return this.#task(bid, async () => exportPseudocode(await this.#session(bid), { language, inference }, ctx));
   }
 
   async storage() {
@@ -184,6 +231,7 @@ export class Engine {
   // ----------------------------------------------------------- analysis
 
   async info(bid: string) {
+    this.#opens.set(bid, (this.#opens.get(bid) ?? 0) + 1);
     return (await this.#session(bid)).info();
   }
 

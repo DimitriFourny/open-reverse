@@ -248,11 +248,16 @@ export async function uploadAndOpen(file: File): Promise<void> {
 
 export async function deleteBinary(bid: string): Promise<void> {
   await api.remove(bid);
-  if (state.bid === bid) closeBinary();
+  // The engine closed its session already.
+  if (state.bid === bid) closeBinary(bid);
   await refreshBinaries();
 }
 
-export function closeBinary(): void {
+/** Leave the open binary. Its engine session closes too (its project owner, request workers and
+ * in-memory files), unless `next`, the binary about to open, is the same one. */
+export function closeBinary(next?: string): void {
+  const left = state.bid;
+  if (left && left !== next) void api.close(left).catch(() => undefined);
   if (pollTimer) clearTimeout(pollTimer);
   listingCache.clear();
   decompCache.clear();
@@ -283,7 +288,7 @@ export function closeBinary(): void {
 }
 
 export async function openBinary(bid: string, at?: { addr: string | null; view: ViewMode | null }): Promise<void> {
-  closeBinary();
+  closeBinary(bid);
   setState({ bid, openError: null });
   try {
     const info = await api.info(bid);
