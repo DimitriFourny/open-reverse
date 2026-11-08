@@ -200,7 +200,7 @@ function Home() {
                       setState({ dialog: { kind: 'diffWith' } });
                     }}
                   >
-                    Diff with…
+                    Diff…
                   </button>
                   <RecentActions b={b} />
                   <button

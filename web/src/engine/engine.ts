@@ -336,8 +336,9 @@ export class Engine {
    */
   async diff(bidA: string, bidB: string, ctx: TaskContext): Promise<DiffResult> {
     if (bidA === bidB) throw new ApiError(400, 'Pick two different binaries');
-    const a = await this.#diffSide(bidA, ctx, 'A');
-    const b = await this.#diffSide(bidB, ctx, 'B');
+    // Closing either binary meanwhile waits for its side (as for an export).
+    const a = await this.#task(bidA, () => this.#diffSide(bidA, ctx, 'A'));
+    const b = await this.#task(bidB, () => this.#diffSide(bidB, ctx, 'B'));
     for (const id of this.#sigTables.keys()) if (id !== bidA && id !== bidB) this.#sigTables.delete(id);
     ctx.progress({ phase: 'match', done: 0, total: null });
     const started = Date.now();
@@ -400,11 +401,7 @@ export class Engine {
       }
       return side(sigs, false);
     } finally {
-      if (!wasOpen) {
-        await this.#closeSession(bid);
-        await vfs.flush();
-        await this.workspace.unload(bid);
-      }
+      if (!wasOpen) await this.#closeSession(bid, true);
     }
   }
 
