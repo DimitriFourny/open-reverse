@@ -2,7 +2,7 @@
 // disassembly through OpenDecomp's emission mappings.
 
 import { useEffect, useMemo, useRef } from 'react';
-import type { Decompilation, Mapping, Variable } from '../api.ts';
+import type { Decompilation, GlobalRef, Mapping, Variable } from '../api.ts';
 import { getState, navigate, setState, useStore } from '../store.ts';
 import { splitLines, tokenize, type Token } from '../syntax.ts';
 import { FindBar, onCodeMouseDown, useDomFind } from './codeui.tsx';
@@ -46,14 +46,17 @@ export function PseudoView({ decomp }: { decomp: Decompilation }) {
 
   const lines = useMemo(() => splitLines(tokenize(decomp.text, decomp.language)), [decomp]);
   const variables = useMemo(() => new Map((decomp.variables ?? []).map((v) => [v.name, v])), [decomp]);
-  /** The parameter or local a token names (not a member after `.` or `->`). */
-  const variableAt = (line: Token[], i: number) => {
+  const globals = useMemo(() => new Map((decomp.globals ?? []).map((g) => [g.name, g])), [decomp]);
+  /** The parameter, local or global a token names (not a member after `.` or `->`). */
+  const nameAt = (line: Token[], i: number): { variable?: Variable; global?: GlobalRef } => {
     const t = line[i]!;
-    if (t.kind !== 'ident') return undefined;
+    if (t.kind !== 'ident') return {};
     let j = i - 1;
     while (j >= 0 && line[j]!.kind === 'space') j--;
     const prev = line[j]?.text;
-    return prev === '.' || prev === '->' ? undefined : variables.get(t.text);
+    if (prev === '.' || prev === '->') return {};
+    const variable = variables.get(t.text);
+    return variable ? { variable } : { global: globals.get(t.text) };
   };
 
   // When the cursor moved in the disassembly (not from a click here), highlight its statements.
@@ -71,7 +74,7 @@ export function PseudoView({ decomp }: { decomp: Decompilation }) {
     if (r.top < box.top || r.bottom > box.bottom) el.scrollIntoView({ block: 'center' });
   }, [spans, linked]);
 
-  const onToken = (t: Token, variable?: Variable) => {
+  const onToken = (t: Token, variable?: Variable, global?: GlobalRef) => {
     const decl = decomp.declarationSpan;
     const inDecl = !!decl && t.start >= decl.start && t.start < decl.end;
     const m = inDecl ? null : mappingAt(decomp.mappings, t.start, decl);
@@ -84,8 +87,10 @@ export function PseudoView({ decomp }: { decomp: Decompilation }) {
       selection: fn
         ? { kind: 'function', fnId: fn.id }
         : variable
-          ? { kind: 'variable', fnId: decomp.function.id, id: variable.id, name: variable.name, parameter: variable.parameter }
-          : null,
+          ? { kind: 'variable', fnId: decomp.function.id, id: variable.id, name: variable.name, parameter: variable.parameter, type: variable.type }
+          : global
+            ? { kind: 'addr', addr: global.addr, global: { name: global.name, type: global.type } }
+            : null,
       ...(addrs[0] && loc ? { loc: { ...loc, addr: addrs[0] } } : {}),
     });
   };
@@ -108,24 +113,27 @@ export function PseudoView({ decomp }: { decomp: Decompilation }) {
               <span className="ptext">
                 {line.map((t, i) => {
                   const fn = t.kind === 'call' || t.kind === 'ident' ? byName.get(t.text) : undefined;
-                  const variable = fn ? undefined : variableAt(line, i);
+                  const { variable, global } = fn ? {} : nameAt(line, i);
                   const sel =
                     (fn && selection?.kind === 'function' && selection.fnId === fn.id) ||
-                    (variable && selection?.kind === 'variable' && selection.id === variable.id);
+                    (variable && selection?.kind === 'variable' && selection.id === variable.id) ||
+                    (global && selection?.kind === 'addr' && selection.addr === global.addr);
                   const k = pseudoKey(t.kind, t.text);
                   return (
                     <span
                       key={t.start}
                       data-k={k ?? undefined}
-                      className={`tok t-${fn ? 'fn' : t.kind}${variable ? ' t-var' : ''}${hot(t) ? ' hot' : ''}${sel ? ' selected' : ''}`}
-                      onClick={() => onToken(t, variable)}
+                      className={`tok t-${fn ? 'fn' : t.kind}${variable ? ' t-var' : ''}${global ? ' t-global' : ''}${hot(t) ? ' hot' : ''}${sel ? ' selected' : ''}`}
+                      onClick={() => onToken(t, variable, global)}
                       onDoubleClick={fn ? () => void navigate(fn.entry) : undefined}
                       title={
                         fn
                           ? `${fn.name} @ ${fn.entry} — double-click to open`
                           : variable
-                            ? `${variable.parameter ? 'parameter' : 'local'} ${variable.name} — N to rename`
-                            : undefined
+                            ? `${variable.parameter ? 'parameter' : 'local'} ${variable.type ? `${variable.type} ` : ''}${variable.name} — N rename · Y retype${/^(?:const )?struct_[0-9a-f]+ \*$/.test(variable.type ?? '') ? ' · S create structure' : ''}`
+                            : global
+                              ? `global ${global.type} ${global.name} @ ${global.addr} — N rename · Y retype · X xrefs`
+                              : undefined
                       }
                     >
                       {t.text}

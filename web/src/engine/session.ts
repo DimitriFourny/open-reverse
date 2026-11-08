@@ -3,11 +3,12 @@
 
 import { openBinary, type BinarySession, type ToolInput, type ToolResult } from '@od/api/index.js';
 import type { QueryService } from '@od/service/queries/index.js';
-import { entityIdentity, userTypeIdentity } from '@od/core/identity.js';
+import { entityIdentity, typeLibraryIdentity, userTypeIdentity } from '@od/core/identity.js';
 import { encodeTypeDefinition } from '@od/core/serialization.js';
 import { parseCDeclarations } from '@od/metadata/c-declarations/index.js';
 import { canon, operandConstants } from './hex.ts';
-import { compilePrototype, PrototypeError, type TypeDefinition } from './prototype.ts';
+import { compilePrototype, compileType, PrototypeError, type TypeDefinition, type TypeIds } from './prototype.ts';
+import { declaredMembers, normalizeType, recoveredDeclaration, structLayout } from './structs.ts';
 import { createHash } from './shims/crypto.ts';
 import type { BinaryRecord, Workspace } from './workspace.ts';
 
@@ -113,6 +114,29 @@ export interface Variable {
   name: string;
   id: string;
   parameter: boolean;
+  /** Its C type as declared in the text (`struct_47fdf8 *`, `uint8_t[16]`); null in python-like. */
+  type: string | null;
+}
+
+/** A global the C-like text declares: `extern struct Args args;` followed by a VA comment. */
+export interface GlobalRef {
+  name: string;
+  addr: string;
+  type: string;
+}
+
+/** Globals declared by the `extern` lines of C-like pseudocode, which state their VA. */
+function declaredGlobals(text: string): GlobalRef[] {
+  const out: GlobalRef[] = [];
+  for (const m of text.matchAll(/^extern (.+?) ?\b([A-Za-z_][A-Za-z0-9_]*)((?:\[[^\]]*\])*); \/\* VA (0x[0-9a-f]+)\b/gm))
+    out.push({ name: m[2]!, addr: canon(m[4]!), type: normalizeType(m[1]!) + m[3]! });
+  return out;
+}
+
+/** The C type of a declaration (`uint8_t buf[16];` declares `uint8_t[16]`). */
+function declaredType(text: string, name: string): string | null {
+  const m = new RegExp(`^(.*?)\\b${name}\\s*((?:\\[[^\\]]*\\])*)\\s*;?$`).exec(text.trim());
+  return m && m[1]!.trim() ? normalizeType(m[1]!) + m[2]!.replace(/\s+/g, '') : null;
 }
 
 const C_STATEMENT = /^(?:return|goto|break|continue|case|default|if|else|while|do|for|switch)\b/;
@@ -132,6 +156,9 @@ function errorMessages(result: unknown): string {
 }
 
 const AUTHOR = 'open-reverse';
+
+type Definition = Parameters<typeof encodeTypeDefinition>[0];
+type DecompileOptions = { language: 'c-like' | 'python-like'; inference: 'proven' | 'likely'; view: 'source' | 'checked' };
 
 type StoredAnnotation = { id: string; entity_id: string; status: string; value: { kind: string } };
 /** Annotations on one function, in the wire form `annotations_apply` takes back. */
@@ -802,19 +829,27 @@ export class AnalysisSession {
     const variables: Variable[] = [];
     const decl = e.declaration_span ?? null;
     const named = new Set<string>();
+    // A declaration's refs may start with the storage it was loaded from (a frame field):
+    // the value is the first ref OpenDecomp states a parameter or type inference about.
+    const valueRefs = new Set<number>();
+    for (const i of (e.inferences ?? []) as { subject_refs: number[]; details?: { kind?: string } }[])
+      if (i.details?.kind === 'parameter' || i.details?.kind === 'type') for (const k of i.subject_refs) valueRefs.add(k);
     for (const m of e.mappings) {
-      const id = e.ids[m.semantic_refs[0] ?? -1];
+      const id = e.ids[m.semantic_refs.find((k) => valueRefs.has(k)) ?? m.semantic_refs[0] ?? -1];
       if (!id || id === functionId) continue;
       const name = declaredName(e.text.slice(m.start, m.end), e.language);
       if (!name || named.has(name)) continue;
       named.add(name);
-      variables.push({ name, id, parameter: !!decl && m.start >= decl.start && m.end <= decl.end });
+      const parameter = !!decl && m.start >= decl.start && m.end <= decl.end;
+      const type = e.language.startsWith('python') ? null : declaredType(e.text.slice(m.start, m.end), name);
+      variables.push({ name, id, parameter, type });
     }
     return {
       function: fn,
       text: e.text,
       language: e.language,
       variables,
+      globals: e.language.startsWith('python') ? [] : declaredGlobals(e.text),
       state: result.state,
       cache: data.cache,
       diagnostics: (result.diagnostics ?? []).map((d) => ({ severity: d.severity, code: d.code, message: d.message })),
@@ -1017,7 +1052,6 @@ export class AnalysisSession {
     const fn = await this.functionById(functionId);
     const slice = this.binary.image.selected_slice_id;
     const signatureId = annotationId(`signature:${functionId}`);
-    type Definition = Parameters<typeof encodeTypeDefinition>[0];
     const result = await this.#writes.run(async () => {
       const ours = (await this.#functionAnnotations(functionId)).filter(
         (a) =>
@@ -1032,12 +1066,7 @@ export class AnalysisSession {
       }
       let compiled;
       try {
-        compiled = compilePrototype(text, (source) => parseCDeclarations(source, { abi: this.binary.image.target.abi }), {
-          named: (name) => this.#typeNames.get(name) ?? userTypeIdentity(slice, name),
-          pointerTo: (name) => this.#typeNames.get(`${name}*`) ?? userTypeIdentity(slice, `${name}*`),
-          local: (definition) =>
-            entityIdentity(slice, 'open-reverse-type', [JSON.stringify(encodeTypeDefinition(definition as Definition))]),
-        });
+        compiled = compilePrototype(text, this.#parse, this.#typeIds);
       } catch (error) {
         if (error instanceof PrototypeError) throw new ApiError(400, error.message);
         throw error;
@@ -1071,19 +1100,7 @@ export class AnalysisSession {
       // Mach-O symbols carry a leading underscore that the C spelling drops.
       const spellings = [fn.name, fn.originalName].flatMap((n) => (n ? [n, n.replace(/^_/, '')] : []));
       if (!spellings.includes(compiled.name)) edits.push(set(annotationId(`name:${functionId}`), { kind: 'name', value: compiled.name }));
-      try {
-        return await this.#apply(edits);
-      } catch (error) {
-        if (error instanceof ApiError && /not a declaration/.test(error.message) && compiled.namedTypes.length) {
-          // Names this session saw in the library are known; the others are the likely culprits.
-          const unknown = compiled.namedTypes.filter((n) => !this.#typeNames.has(n));
-          throw new ApiError(
-            400,
-            `Declare ${(unknown.length ? unknown : compiled.namedTypes).join(', ')} in the Types view first: named types in a prototype refer to the type library.\n${error.message}`,
-          );
-        }
-        throw error;
-      }
+      return this.#applyNamed(edits, compiled.namedTypes);
     });
     if (!text.trim()) return { ...result, confirmed: true };
     // OpenDecomp binds a declared signature only where the reconstruction confirms it
@@ -1096,6 +1113,148 @@ export class AnalysisSession {
    * Renames a parameter or local: a `name` annotation on its value subject. Those are
    * analysis-catalog subjects, so a decompilation must be published at the current revision.
    */
+  /** Applies `edits`; a failure from undeclared named types says which ones to declare. */
+  async #applyNamed(edits: unknown[], namedTypes: string[]) {
+    try {
+      return await this.#apply(edits);
+    } catch (error) {
+      if (error instanceof ApiError && /not a declaration|resolve/.test(error.message) && namedTypes.length) {
+        // Names this session saw in the library are known; the others are the likely culprits.
+        const unknown = namedTypes.filter((n) => !this.#typeNames.has(n));
+        throw new ApiError(
+          400,
+          `Declare ${(unknown.length ? unknown : namedTypes).join(', ')} in the Types view first: named types refer to the type library.\n${error.message}`,
+        );
+      }
+      throw error;
+    }
+  }
+
+  readonly #parse = (source: string) => parseCDeclarations(source, { abi: this.binary.image.target.abi });
+
+  /** Type IDs of compiled C types: library names, else content-derived IDs for anonymous types. */
+  get #typeIds(): TypeIds {
+    const slice = this.binary.image.selected_slice_id;
+    return {
+      named: (name) => this.#typeNames.get(name) ?? userTypeIdentity(slice, name),
+      pointerTo: (name) => this.#typeNames.get(`${name}*`) ?? userTypeIdentity(slice, `${name}*`),
+      local: (definition) => entityIdentity(slice, 'open-reverse-type', [JSON.stringify(encodeTypeDefinition(definition as Definition))]),
+    };
+  }
+
+  /**
+   * Sets (or, with an empty text, removes) the C type of a parameter, local or global: an
+   * asserted `type` annotation binding its subject to the type. The anonymous types it
+   * needs (builtins, pointers, arrays) are declared, nameless, on the image's type library
+   * with content-derived IDs, so one declaration serves every subject and a global (whose
+   * type OpenDecomp resolves outside any function) finds them too.
+   */
+  async #setType(subject: { entity_id: string } | { address: { image_id: string; space: 'va'; value: string } }, key: string, text: string) {
+    const id = annotationId(`type:${key}`);
+    return this.#writes.run(async () => {
+      if (!text.trim()) {
+        const result = await this.#service.execute('annotations_apply', {
+          project_id: this.binary.projectId,
+          expected_revision: this.binary.revision,
+          author: AUTHOR,
+          origin: 'user',
+          edits: [{ operation: 'remove', id }],
+        } as ToolInput<'annotations_apply'>);
+        // Nothing to remove is fine.
+        if ('data' in result && result.data) this.binary.revision = result.data.revision;
+        return { revision: this.binary.revision };
+      }
+      let compiled;
+      try {
+        compiled = compileType(text, this.#parse, this.#typeIds);
+      } catch (error) {
+        if (error instanceof PrototypeError) throw new ApiError(400, error.message);
+        throw error;
+      }
+      const library = typeLibraryIdentity(this.binary.image.selected_slice_id);
+      const edits: unknown[] = [...compiled.declarations].map(([typeId, definition]) => ({
+        operation: 'set',
+        id: annotationId(`library-type:${typeId}`),
+        entity_id: library,
+        value: { kind: 'type', type_id: typeId, definition: encodeTypeDefinition(definition as Definition) },
+        status: 'asserted',
+        evidence_ids: [],
+      }));
+      edits.push({ operation: 'set', id, ...subject, value: { kind: 'type', type_id: compiled.type }, status: 'asserted', evidence_ids: [] });
+      return this.#applyNamed(edits, compiled.namedTypes);
+    });
+  }
+
+  /**
+   * Retypes a parameter or local (Y on a variable); its value subject must be in a
+   * decompilation at this revision. Resolves to the type the new pseudocode declares it
+   * with (`shown`): OpenDecomp may not honour a type its analysis contradicts.
+   */
+  async setVariableType(functionId: string, valueId: string, text: string, options: DecompileOptions) {
+    let result;
+    try {
+      result = await this.#setType({ entity_id: valueId }, valueId, text);
+    } catch (error) {
+      if (!(error instanceof ApiError) || !/absent|subject/i.test(error.message)) throw error;
+      // The project moved on since this pseudocode was produced: publish it at this revision.
+      await this.decompile(functionId, options);
+      result = await this.#setType({ entity_id: valueId }, valueId, text);
+    }
+    const d = await this.decompile(functionId, { ...options, language: 'c-like' });
+    return { ...result, shown: d.variables.find((v) => v.id === valueId)?.type ?? null };
+  }
+
+  /** Retypes the global (data entity) at an address. */
+  async setGlobalType(addr: string, text: string) {
+    const a = canon(addr);
+    return this.#setType({ address: { image_id: this.binary.image.id, space: 'va', value: a } }, `va:${a}`, text);
+  }
+
+  /**
+   * The C declaration of a new structure `name` with the members OpenDecomp recovered for
+   * what a pointer variable points to (its `struct_<hex>` in this function's text), at the
+   * same offsets.
+   */
+  async structFromVariable(functionId: string, variable: string, name: string, options: DecompileOptions) {
+    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(name)) throw new ApiError(400, 'Structure names must be C identifiers');
+    const d = await this.decompile(functionId, { ...options, language: 'c-like' });
+    const v = d.variables.find((x) => x.name === variable);
+    if (!v) throw new ApiError(404, `No variable ${variable} in this function`);
+    const tag = /^(?:const )?(struct_[0-9a-f]+) \*$/.exec(v.type ?? '')?.[1];
+    if (!tag)
+      throw new ApiError(
+        422,
+        `${variable} (${v.type ?? 'unknown type'}) is not a pointer to a structure OpenDecomp recovered: no member accesses through it were found`,
+      );
+    const recovered = declaredMembers(d.text, tag);
+    if (!recovered || recovered.members.length === 0) throw new ApiError(422, `OpenDecomp declares no members for ${tag}`);
+    try {
+      return { declaration: recoveredDeclaration(recovered, name, this.#parse), recovered: tag };
+    } catch (error) {
+      throw new ApiError(422, error instanceof Error ? error.message : String(error));
+    }
+  }
+
+  /**
+   * Field offsets and sizes of structure `name` in `source`, laid out by OpenDecomp's C
+   * declaration parser (what `types_declare` would store). `library` (the type library's
+   * other declarations) is in scope, so members may use them.
+   */
+  layoutStructure(source: string, name: string, library: string[]) {
+    const own = structLayout(source, name, this.#parse);
+    if (!('errors' in own) || library.length === 0) return own;
+    // Library declarations first, dependencies before use: retry the ones that need others.
+    let scope: string[] = [];
+    let pending = library;
+    while (pending.length) {
+      const left = pending.filter((decl) => this.#parse([...scope, decl].join('\n')).diagnostics.length > 0);
+      scope = [...scope, ...pending.filter((decl) => !left.includes(decl))];
+      if (left.length === pending.length) break;
+      pending = left;
+    }
+    return structLayout([...scope, source].join('\n'), name, this.#parse);
+  }
+
   async renameVariable(
     functionId: string,
     valueId: string,
