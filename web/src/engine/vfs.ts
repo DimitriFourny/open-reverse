@@ -346,6 +346,13 @@ export class VFS {
     return live ? live.size() : (this.nodes.get(p)?.data.length ?? 0);
   }
 
+  /** Bytes of the files held in memory (an open database's are in SQLite's heap, not here). */
+  memoryBytes(): number {
+    let n = 0;
+    for (const [p, node] of this.nodes) if (node.kind === 'file' && !this.live.has(p)) n += node.data.length;
+    return n;
+  }
+
   read(path: string): Uint8Array {
     const p = this.norm(path);
     const n = this.nodes.get(p);

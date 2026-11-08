@@ -225,6 +225,7 @@ import type { TaskProgress } from './engine/tasks.ts';
 import type { NavMap, SearchHit, SearchQuery, SearchResult } from './engine/search.ts';
 import type { DataDef, DataType, LinearRow, LinearWindow } from './engine/linear.ts';
 import type { DataAction } from './engine/session.ts';
+import type { EngineMemory } from './engine/memory.ts';
 
 export type { DataAction, DataDef, DataType, LinearRow, LinearWindow, NavMap, SearchHit, SearchQuery, SearchResult, TaskProgress };
 
@@ -304,6 +305,8 @@ function call<T>(method: string, args: unknown[], signal?: AbortSignal, transfer
 
 export const api = {
   setThreads: (n: number) => call<{ threads: number }>('setThreads', [n]),
+  /** Bytes the engine worker holds (SQLite heap, in-memory files, JS heap where reported). */
+  engineMemory: () => call<EngineMemory>('engineMemory', []),
   binaries: () => call<{ binaries: BinaryRecord[]; open: string[] }>('binaries', []),
   upload: async (file: File) => {
     const bytes = new Uint8Array(await file.arrayBuffer());

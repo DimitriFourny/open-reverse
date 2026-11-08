@@ -8,6 +8,8 @@ import { vfs } from './vfs.ts';
 import type { SearchQuery } from './search.ts';
 import type { TaskContext } from './tasks.ts';
 import { exportPseudocode, snapshotProject, storageUsage } from './transfer.ts';
+import { autoThreads, deviceMemory, jsHeapUsed, type EngineMemory } from './memory.ts';
+import { sqliteHeapBytes } from './shims/sqlite.ts';
 import type { DataDef } from './linear.ts';
 import { Workspace, type BinaryRecord } from './workspace.ts';
 
@@ -34,7 +36,12 @@ export class Engine {
   static defaultThreads(): number {
     if (typeof Worker === 'undefined') return 1; // no nested workers (older Safari)
     const cores = (typeof navigator !== 'undefined' && navigator.hardwareConcurrency) || 2;
-    return Math.max(2, Math.min(4, cores - 1));
+    return autoThreads(cores, deviceMemory());
+  }
+
+  /** What the engine worker holds in memory (the helper workers are not included). */
+  engineMemory(): EngineMemory {
+    return { sqlite: sqliteHeapBytes(), files: vfs.memoryBytes(), js: jsHeapUsed() };
   }
 
   /** Set the number of decompile workers (0 = automatic). Applies when a binary is next opened. */

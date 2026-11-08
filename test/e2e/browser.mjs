@@ -24,10 +24,17 @@ try {
 const TMP = process.env.E2E_TMP ?? join(tmpdir(), `open-reverse-e2e-${process.pid}`);
 mkdirSync(TMP, { recursive: true });
 const FIX = fileURLToPath(new URL('../../vendor/open-decomp/fixtures/bin/', import.meta.url));
+// OpenDecomp's Objective-C test inputs (test/metadata/fixtures/objc-foundation.m, built with objc_msgSend + __objc_selrefs).
+const OBJC = fileURLToPath(new URL('../../vendor/open-decomp/test/metadata/fixtures/objc-foundation-classic', import.meta.url));
 const URL_ = process.env.OPEN_REVERSE_URL ?? 'http://localhost:5199/';
 const STRIPPED = process.env.STRIPPED_BINARY ?? '/bin/ls';
 const SSHPASS = process.env.SSHPASS_BINARY ?? '/tmp/sshpass';
 let failures = 0;
+// A promise a step left behind must fail the run, not crash it before the other steps.
+process.on('unhandledRejection', (e) => {
+  failures++;
+  console.log(`FAIL unhandled rejection: ${String(e?.message ?? e).split('\n')[0]}`);
+});
 {
   const browser = await chromium.launch();
   const ctx = await browser.newContext({ viewport: { width: 1600, height: 950 } });
@@ -645,6 +652,94 @@ return (await or.xrefsTo(s.addr)).length`);
     await page.locator(`.menu-item.${cls}`).click();
   };
   let archivePath = null;
+  // ------------------------------------------------ ARM64 Mach-O
+  const goTo = async (target) => {
+    await page.keyboard.press('g');
+    await page.fill('.modal-input', target);
+    await page.waitForTimeout(200);
+    await page.keyboard.press('Enter');
+  };
+  const waitCursor = (re, what) =>
+    page.waitForFunction((src) => new RegExp(src).test(document.querySelector('.pane-main .row.cursor')?.textContent ?? ''), re.source, { timeout: 60000 }).catch(async () => {
+      throw new Error(`${what}: cursor line is ${JSON.stringify(await page.locator('.pane-main .row.cursor').first().innerText().catch(() => null))}`);
+    });
+  await step('ARM64 Mach-O: ADRP+ADD auto-comment, X on it, graph, rename + undo', async () => {
+    await page.locator('.brand').click();
+    await page.locator('.recent-item', { hasText: 'macho-arm64-symbols' }).click();
+    await page.locator('.side-item', { hasText: '_fixture_string' }).click();
+    await page.waitForSelector('.pline:has-text("fixture_string(")', { timeout: 120000 });
+    // The ADD of an ADRP pair: OpenDecomp resolves the page + offset to the string.
+    const add = page.locator('.row.insn.cur-fn', { has: page.locator('.mn:text-is("add")') }).filter({ has: page.locator('.comment .ref-string') }).first();
+    if (!(await add.locator('.comment').innerText()).includes('open-decomp trusted fixture v1')) throw new Error('no resolved string on the ADRP+ADD row');
+    await add.locator('.addr').click();
+    await page.keyboard.press('x');
+    await page.waitForSelector('.xref-table tbody tr:has-text("_fixture_string")');
+    await page.keyboard.press('Escape');
+    await page.keyboard.press('Space');
+    await page.waitForSelector('.gline.insn:has-text("open-decomp trusted fixture v1")');
+    await page.keyboard.press('Space');
+    await page.locator('.row.insn.cur-fn .addr').first().click();
+    await page.keyboard.press('n');
+    await page.fill('.modal-input', 'message_text');
+    await page.keyboard.press('Enter');
+    await page.waitForSelector('.pline:has-text("message_text(")', { timeout: 120000 });
+    await page.keyboard.press('Control+z');
+    await page.waitForSelector('.side-item.active:has-text("_fixture_string")', { timeout: 60000 });
+    await page.waitForSelector('.pline:has-text("fixture_string(")', { timeout: 120000 });
+  });
+  await step('ARM64 Mach-O: export all pseudocode', async () => {
+    const { name, bytes } = await download(page, () => exportItem('export-pseudo'));
+    const paths = (await zipDecode(bytes)).map((e) => e.path);
+    if (!paths.some((p) => /\/functions\/_?fixture_string@0x[0-9a-f]+\.c$/.test(p))) throw new Error(`no fixture_string.c in ${paths.slice(0, 8).join(', ')}`);
+    console.log(`      ${name}: ${paths.filter((p) => p.includes('/functions/')).length} function files`);
+  });
+  await step('ARM64 Mach-O stripped: discovery, graph, pseudocode, data definition + undo', async () => {
+    await page.locator('.brand').click();
+    await page.setInputFiles('input[type=file]', FIX + 'macho-arm64-stripped');
+    await page.locator('.side-item', { hasText: 'sub_100000594' }).click({ timeout: 120000 });
+    await page.waitForSelector('.pline:has-text("accumulator")', { timeout: 120000 });
+    await page.keyboard.press('Space');
+    await page.waitForFunction(() => document.querySelectorAll('.gnode').length >= 3, null, { timeout: 60000 });
+    await page.keyboard.press('Space');
+    await goTo('0x100008008');
+    await waitCursor(/dup\(\?\)/, 'zero fill');
+    await page.keyboard.press('d');
+    await waitCursor(/db0x0$/, 'D');
+    await page.keyboard.press('Control+z');
+    await waitCursor(/dup\(\?\)/, 'undo of D');
+  });
+  await step('Objective-C: method names, messages at objc_msgSend, selector / class / CFString labels', async () => {
+    await page.locator('.brand').click();
+    await page.setInputFiles('input[type=file]', OBJC);
+    await page.waitForSelector('.side-item:has-text("+[ODCounter counterWithLabel:]")', { timeout: 120000 });
+    await page.locator('.side-item', { hasText: '_ODMakeSummary' }).click();
+    await page.waitForSelector('.pline:has-text("[ODCounter counterWithLabel:")', { timeout: 120000 });
+    await page.waitForSelector('.row.insn.cur-fn:has(.mn-call) .comment:has-text("[ODCounter counterWithLabel:]")');
+    await page.waitForSelector('.row.insn.cur-fn .comment:has-text("@selector(addValue:times:)")');
+    await page.waitForSelector('.row.insn.cur-fn .comment:has-text("class ODCounter")');
+    await page.locator('.side-item', { hasText: '-[ODCounter summary]' }).click();
+    await page.waitForSelector('.row.insn.cur-fn .comment:has-text("[NSString stringWithFormat:]")', { timeout: 60000 });
+    await page.waitForSelector(`.row.insn.cur-fn .comment:has-text('@"%@=%ld"')`);
+    await goTo('0x100008148');
+    await page.waitForSelector('.label-data:text-is("selRef_addValue_times_:")', { timeout: 60000 });
+    await page.waitForSelector('.label-data:text-is("classRef_ODCounter:")');
+    await goTo('0x100004080');
+    await waitCursor(/dq_OBJC_CLASS_\$_ODCounter/, 'class list');
+    await page.waitForSelector('.label-data:text-is("cfstr_hello_fixture:")');
+  });
+  await step('performance: automatic workers by memory, engine memory shown', async () => {
+    await page.waitForSelector('.status-memory:has-text("engine")');
+    await page.locator('.brand').click();
+    // The effective count arrives from the engine after the panel shows.
+    await page.waitForFunction(() => /\(\d\)/.test(document.querySelector('.storage-panel select option')?.textContent ?? ''), null, { timeout: 30000 }).catch(() => undefined);
+    const auto = await page.locator('.storage-panel select option').first().innerText();
+    // One less than the cores (2 to 4), but 1 under 8 GB and at most 2 otherwise.
+    const [cores, memory] = await page.evaluate(() => [navigator.hardwareConcurrency || 2, navigator.deviceMemory ?? null]);
+    const want = Math.min(Math.max(2, Math.min(4, cores - 1)), memory !== null && memory < 8 ? 1 : 2);
+    if (auto !== `Automatic (${want})`) throw new Error(`${auto} with ${cores} cores and deviceMemory ${memory}`);
+    await page.waitForSelector('.engine-memory:has-text("SQLite")');
+  });
+
   await step('reopen ELF from the recent list', async () => {
     await page.locator('.brand').click();
     await page.locator('.recent-item', { hasText: 'elf-x86_64-symbols' }).click();
@@ -659,9 +754,17 @@ return (await or.xrefsTo(s.addr)).length`);
   });
   await step('export all pseudocode (zip with one .c per function + types.h)', async () => {
     let sawProgress = false;
-    const watcher = page.waitForSelector('.task-panel:has-text("Decompiling")', { timeout: 120000 }).then(() => (sawProgress = true));
-    const { name, bytes } = await download(page, () => exportItem('export-pseudo'));
-    await watcher.catch(() => undefined);
+    // Settles on its own (never rejects), so a slow export cannot leave an unhandled rejection behind.
+    const watcher = page.waitForSelector('.task-panel:has-text("Decompiling")', { timeout: 120000 }).then(
+      () => (sawProgress = true),
+      () => undefined,
+    );
+    const t0 = Date.now();
+    const { name, bytes } = await download(page, () => exportItem('export-pseudo')).catch(async (e) => {
+      const panel = await page.locator('.task-panel').innerText().catch(() => 'no task panel');
+      throw new Error(`${e.message.split('\n')[0]} after ${Date.now() - t0} ms; task panel: ${JSON.stringify(panel)}`);
+    });
+    await watcher;
     if (!sawProgress) throw new Error('no per-function progress shown');
     const entries = await zipDecode(bytes);
     const paths = entries.map((e) => e.path);
