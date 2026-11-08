@@ -6,6 +6,8 @@ import { Sidebar } from './components/Sidebar.tsx';
 import { XrefsPanel } from './components/XrefsPanel.tsx';
 import { NAV_LEGEND, NavStrip, navStripHidden } from './components/NavStrip.tsx';
 import { SearchPanel } from './components/SearchPanel.tsx';
+import { ScriptConsole } from './components/ScriptConsole.tsx';
+import { getConsole, stopScript, toggleConsole } from './scripting.ts';
 import { closeSearch, getSearch, openSearch } from './search.ts';
 import {
   back,
@@ -62,6 +64,8 @@ function useKeyboard() {
       else if (e.altKey && !e.ctrlKey && !e.metaKey && e.code === 'KeyB') openSearch('bytes');
       else if (e.altKey && !e.ctrlKey && !e.metaKey && e.code === 'KeyT') openSearch('text');
       else if (e.altKey && !e.ctrlKey && !e.metaKey && e.code === 'KeyI') openSearch('immediate');
+      // IDA's script snippets (Shift+F2): the JavaScript console.
+      else if (k === 'F2' && e.shiftKey && plain) toggleConsole();
       else if ((e.ctrlKey || e.metaKey) && (k === 'p' || k === 'k')) {
         e.preventDefault();
         setState({ dialog: { kind: 'goto' } });
@@ -89,6 +93,7 @@ function useKeyboard() {
       else if (dataKeys(s.loc?.view) && (k === 'p' || k === 'P')) createFunction();
       else if (k === 'Escape') {
         if (getUi().find) setUi({ find: null });
+        else if (getConsole().running) stopScript();
         else if (s.xrefs) setState({ xrefs: null });
         else if (getSearch().open) closeSearch();
         else back();
@@ -276,6 +281,7 @@ function TopBar({ showNav, onToggleNav }: { showNav?: boolean; onToggleNav?: () 
         <button disabled={!canFwd} onClick={forward} title="Forward (Alt+→)">→</button>
         <button onClick={() => setState({ dialog: { kind: 'goto' } })} title="Go to (G, Ctrl+P)">Go to…</button>
         <button onClick={() => openSearch()} title="Search bytes (Alt+B), text (Alt+T) or an immediate value (Alt+I)">Search…</button>
+        <button onClick={toggleConsole} title="JavaScript console with the `or` scripting API (Shift+F2)">Script</button>
       </div>
       <div className="seg">
         {views.map(([v, label, title]) => (
@@ -350,7 +356,7 @@ function StatusBar() {
       )}
       {showToast && <span className={`toast toast-${toast.kind}`}>{toast.text}</span>}
       <span className="spacer" />
-      <span className="dim keys">G go · ↑↓ move · Enter follow · Ctrl+F find · N rename · Y type/signature · S create struct · X xrefs · Shift+X xrefs from · ; comment · D A O * U data · Alt+B/T/I search · Ctrl+Z undo · Alt+M mark · Ctrl+M marks · Space graph · Tab pseudo · H hex · B bytes · Esc back</span>
+      <span className="dim keys">G go · ↑↓ move · Enter follow · Ctrl+F find · N rename · Y type/signature · S create struct · X xrefs · Shift+X xrefs from · ; comment · D A O * U data · Alt+B/T/I search · Ctrl+Z undo · Alt+M mark · Ctrl+M marks · Shift+F2 script · Space graph · Tab pseudo · H hex · B bytes · Esc back</span>
     </div>
   );
 }
@@ -498,6 +504,7 @@ export function App() {
             </div>
             <XrefsPanel />
             <SearchPanel />
+            <ScriptConsole />
           </div>
         </div>
       )}

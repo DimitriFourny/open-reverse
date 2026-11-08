@@ -1399,3 +1399,62 @@ select:focus {
   white-space: nowrap;
   margin-right: 12px;
 }
+
+/* ------------------------------------------------------------ script console */
+.script-console {
+  height: 38%;
+}
+.script-console .panel-head select {
+  font-size: 11px;
+  max-width: 200px;
+}
+.script-body {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+}
+.script-editor {
+  width: 45%;
+  min-width: 240px;
+  resize: horizontal;
+  border: none;
+  border-right: 1px solid var(--border);
+  background: var(--bg-2);
+  color: var(--fg);
+  font: var(--mono-font-spec);
+  line-height: 1.45;
+  padding: 6px 8px;
+  tab-size: 2;
+  outline: none;
+  white-space: pre;
+}
+.script-output {
+  flex: 1;
+  min-width: 0;
+  overflow: auto;
+  padding: 4px 8px;
+  font: var(--mono-font-spec);
+  line-height: 1.4;
+}
+.script-output pre {
+  margin: 0;
+  font: inherit;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.script-output .out-input {
+  color: var(--fg-dim);
+  border-left: 2px solid var(--accent-2);
+  padding-left: 6px;
+  margin-top: 6px;
+}
+.script-output .out-result {
+  color: var(--accent);
+}
+.script-output .out-error {
+  color: var(--error);
+}
+.script-output .out-info {
+  color: var(--fg-dim);
+  font-style: italic;
+}

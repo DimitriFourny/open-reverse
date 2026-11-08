@@ -40,6 +40,26 @@ OpenDecomp loads, disassembles and decompiles the binary, and OpenReverse runs i
 - **Function signatures** (`Y`, like IDA): edit the function's C prototype, e.g. `int parse(struct Node *n, char *s)`. It is stored as an asserted `signature` annotation: the function and its callers are re-decompiled with the declared types and parameter names. Named types come from the type library; builtins and pointers are declared next to the signature. Changing the name in the prototype renames the function; Reset removes the signature. OpenDecomp applies a declared signature only where its reconstruction confirms it and when type recovery is complete; a toast says when it did not (for example on ELF images, whose type recovery stays partial because OpenDecomp has no ELF DWARF reader).
 - **Renames** of functions, globals, **parameters and locals**. They are stored as OpenDecomp annotations, so every caller's pseudocode picks up the new name, and MCP agents working on the same project see them too. A parameter or local is renamed by selecting it in the pseudocode and pressing `N`: the name is a `name` annotation on the value OpenDecomp declared it from. Those values are analysis subjects, not durable addresses: the name follows the function as long as its analysis yields the same value (it survives renames, signatures and other edits), but OpenDecomp may drop it if a later analysis reshapes the function (see OpenDecomp's docs/CORE.md on value subjects). Frame-object members (`frame.local_8`) and structure members are not renameable this way; members get their names from type declarations.
 - **Comments** on any address.
+- **Script console** (`Shift+F2`, IDA's script snippets / Binary Ninja's Python console; or **Script** in the top bar): write JavaScript in the editor and run it with `Ctrl+Enter`. The `or` object is the API (see below; `help()` or **Help** lists it), `print(...)` writes to the output, and top-level `await` works. A script that is one expression shows its value; otherwise `return` one. Results are pretty-printed (objects and arrays indented unless short, lists cut after 100 items with a count, byte arrays as hex), errors show the script line. Scripts run before are kept in this browser's localStorage (the **History** list, or `↑` / `↓` in an empty editor), and **Examples** has a few to start from (largest functions, strings by reference count, the string argument of every call to `fprintf`, commenting calls, a hex dump). **Stop** (or `Esc`) makes the script's next API call throw.
+  - Scripts run in the page, calling the same engine RPCs (`api.ts`) and store edit functions as the UI: a rename, comment, bookmark, type or data definition from a script refreshes every view and is one `Ctrl+Z` step, exactly like the same edit made by hand. API calls are asynchronous messages to the engine worker, so the page stays responsive while a script awaits them (the API also yields to the page every 30 ms); a tight loop of plain JavaScript without `await` blocks the page until it ends, and cannot be stopped. Only the script typed in the editor is evaluated; nothing is sent anywhere.
+  - Targets are addresses as hex strings (`'0x401000'`, `'401000h'`), numbers, bigints, names (`'main'`, `'_fprintf'`; functions, then symbols) or objects the API returned (a function, a string, a symbol).
+  - Read: `or.info()`, `or.functions()` (name, entry, size, originalName, mangled, renamed, importStub), `or.func(target)` (also an address inside a function; null when none), `or.strings()`, `or.symbols()`, `or.sections()`, `or.xrefsTo(target)`, `or.xrefsFrom(target)`, `or.callers(fn)`, `or.callees(fn)`, `or.disasm(fn)` (instructions with addr, bytes, mnemonic, operands, flow, operand refs and resolved targets such as ADRP pairs), `or.decompile(fn)` (the pseudocode text, with the toolbar's dialect and options), `or.variables(fn)`, `or.read(addr, length)` (a `Uint8Array`, shorter when the range leaves mapped memory), `or.search.bytes('48 8b ?? 05')`, `or.search.text('usage', { caseSensitive })`, `or.search.immediate(0x862)`, `or.comments()`, `or.bookmarks()`, `or.here()`, `or.hereFunction()`, `or.selection()`.
+  - Write (undoable): `or.rename(target, name)`, `or.renameVar(fn, variable, name)`, `or.comment(addr, text)`, `or.bookmark(addr, text)` (null removes), `or.setType(addr, 'char *')` for a global or `or.setType({ fn, var: 'arg0' }, 'int')` for a parameter or local, `or.defineData(addr, 'cycle' | 'string' | 'ptr' | 'array' | 'undefine', count?)`, `or.undo()`, `or.redo()`. UI: `or.goto(target)`.
+  - Example: the string each call to `fprintf` passes in `/tmp/sshpass` (an arm64 Mach-O) — the **Examples** entry scans the disassembly because OpenDecomp's reference index has no incoming references of an import stub (`or.xrefsTo('_fprintf')` is empty there; outgoing references from the callers name it):
+    ```js
+    const target = await or.func('fprintf');
+    for (const f of await or.functions()) {
+      if (f.importStub) continue;
+      const insns = await or.disasm(f);
+      insns.forEach((n, i) => {
+        if (n.flow.kind !== 'call' || !n.refs.some((r) => r.addr === target.entry)) return;
+        const str = insns.slice(Math.max(0, i - 8), i).reverse()
+          .flatMap((p) => [...(p.resolved ?? []), ...p.refs]).find((r) => r.kind === 'string');
+        print(n.addr, f.name, str ? JSON.stringify(str.label) : '(no string)');
+      });
+    }
+    // 0x100000794 _parse_options "Conflicting password source\n"   (and 4 more)
+    ```
 - **Stripped binaries**: whole-image function discovery runs in the background, and the function list fills in as it progresses.
 - **Your data, in and out** (see [Data and storage](#data-and-storage)): project archives to back up or move a project to another browser, a zip of every function's pseudocode, download of the original binary, per-binary storage use, persistent storage, and project reset.
 
@@ -135,6 +155,7 @@ npm run preview        # serve web/dist locally
 | `U`                | Undefine the data definition at the cursor        |
 | `P`                | Create function: not supported by OpenDecomp (explains why) |
 | `Alt+B`, `Alt+T`, `Alt+I` | Search bytes, text, or an immediate value  |
+| `Shift+F2`         | Script console; in the editor `Ctrl+Enter` runs, `Esc` stops, `↑` `↓` (empty editor) walk the history |
 | `↑` `↓`            | Previous / next instruction (in the graph, across to the fall-through block) |
 | `PgUp` `PgDn`, `Home` `End` | Page up / down (linear), first / last instruction |
 | `Enter`            | Follow the selected operand, else the call/branch target under the cursor |
@@ -143,7 +164,7 @@ npm run preview        # serve web/dist locally
 | `Tab`              | Toggle the pseudocode pane                        |
 | `H`                | Toggle hex view                                   |
 | `B`                | Toggle instruction bytes                          |
-| `Esc`, `Alt+←`     | Back (Esc first closes the find bar, then the xrefs panel) |
+| `Esc`, `Alt+←`     | Back (Esc first closes the find bar, stops a running script, then closes the xrefs panel) |
 | `Alt+→`            | Forward                                           |
 | click              | Move the cursor; on a token, highlight its occurrences |
 | double-click       | Follow a reference                                |
@@ -155,6 +176,7 @@ web/src/
   App.tsx, components/, views/   React UI (linear, graph, pseudocode, hex, types)
   store.ts                       App state, navigation history, caches, edits and their undo entries
   undo.ts                        Undo/redo history (per binary, in memory)
+  scripting.ts, scriptfmt.ts     Script console: the `or` API, running and stopping scripts; result formatting
   api.ts                         Typed RPC client to the engine worker
   engine/
     worker.ts                    Worker entry: boots WASM + SQLite, serves RPC
@@ -173,12 +195,13 @@ vendor/open-decomp               OpenDecomp (git submodule, unmodified)
 
 ## Tests
 
-- `npm test` runs unit tests under Node: the shims (VFS/fs, SQLite, crypto, zstd, v8), the ZIP/project archive encoder and validator (including bookmarks, data definitions and versions), the token keys used for highlighting, the C prototype and type compiler (with OpenDecomp's declaration parser), structure layouts and declarations rebuilt from recovered structures, the undo/redo history, and the whole-image listing's layout (windows built forward and backward join without gaps).
+- `npm test` runs unit tests under Node: the shims (VFS/fs, SQLite, crypto, zstd, v8), the ZIP/project archive encoder and validator (including bookmarks, data definitions and versions), the token keys used for highlighting, the C prototype and type compiler (with OpenDecomp's declaration parser), structure layouts and declarations rebuilt from recovered structures, the undo/redo history, the script console's result formatting, argument normalisation and error line numbers, and the whole-image listing's layout (windows built forward and backward join without gaps).
 - `npm run test:e2e` drives the built site in Chromium. Start the site first with `npm run preview -- --port 5199`, and install the browser with `npm i -D playwright && npx playwright install chromium` (or point `PLAYWRIGHT_PATH` at a playwright package installed elsewhere). It covers:
   - upload, decompilation, renames propagating to callers, comments and persistence across a reload;
   - parameter/local renames, type declarations, and signatures propagating to callers;
   - branch arrows, keyboard navigation, token highlighting, find, the graph minimap, and the graph, hex and xrefs views;
   - the whole-image listing (sections, a string, a GOT slot, data keys with undo/redo, a data rename with undo/redo, xrefs on data, `P`);
   - undo/redo of renames, comments, a local rename, a signature and a type redeclaration; xrefs from and the To/From toggle; the call tree; bookmarks (list, jump, delete, in the archive and after import);
+  - the script console: listing functions, a scripted rename undone with `Ctrl+Z`, xrefs to a string, runtime and syntax error lines, Stop, the history;
   - Mach-O and PE, and a stripped binary with background discovery;
   - data in and out: pseudocode export (and cancel), archive export, binary download, an import conflict, and an archive imported into a fresh browser profile keeping the rename, the comment and the cached decompilation, then a project reset.

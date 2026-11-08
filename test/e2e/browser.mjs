@@ -506,6 +506,52 @@ let failures = 0;
     await page.waitForSelector('.navstrip-canvas');
     await page.keyboard.press('Escape'); // back
   });
+  await step('script console: list functions, rename (Ctrl+Z undoes it), xrefs to a string, errors, stop, history', async () => {
+    const run = async (code) => {
+      const before = await page.locator('.script-output .out-input').count();
+      await page.fill('.script-editor', code);
+      await page.locator('.script-editor').press('Control+Enter');
+      await page.waitForFunction((n) => document.querySelectorAll('.script-output .out-input').length > n && !document.querySelector('.script-output .busy'), before, { timeout: 120000 });
+      // The output of this run: everything after its echoed input.
+      return page.$$eval('.script-output pre', (els) => {
+        const i = els.findLastIndex((e) => e.classList.contains('out-input'));
+        return els.slice(i + 1).map((e) => `${e.className.replace('out-', '')}: ${e.textContent}`);
+      });
+    };
+    await page.locator('.statusbar').click();
+    await page.keyboard.press('Shift+F2');
+    await page.waitForSelector('.script-editor:focus');
+    let out = await run(`const fns = await or.functions();
+print(fns.length, 'functions');
+await or.rename('fixture_divide', 'script_divide');
+return (await or.functions()).filter((f) => f.name.startsWith('script_')).map((f) => f.entry)`);
+    if (!out.some((l) => /^print: \d+ functions$/.test(l)) || !out.includes('result: ["0x401900"]')) throw new Error(`rename: ${out}`);
+    await page.waitForSelector('.side-item:has-text("script_divide")');
+    // The rename is an undo step like a manual one.
+    await page.locator('.statusbar').click();
+    await page.keyboard.press('Control+z');
+    await page.waitForSelector('.side-item:has-text("fixture_divide")', { timeout: 60000 });
+    if (await page.locator('.side-item:has-text("script_divide")').count()) throw new Error('undo kept the scripted name');
+    out = await run(`const s = (await or.strings()).find((s) => s.text.includes('trusted fixture'));
+return (await or.xrefsTo(s.addr)).length`);
+    if (out[0] !== 'result: 1') throw new Error(`xrefs to a string: ${out}`);
+    out = await run('const a = 1;\nnull.f();');
+    if (!/^error: TypeError: .* \(line 2\)$/.test(out[0])) throw new Error(`runtime error: ${out}`);
+    out = await run('print(1)\nconst = 2;');
+    if (!/^error: SyntaxError: .* \(line 2\)$/.test(out[0])) throw new Error(`syntax error: ${out}`);
+    // Stop: the next API call of a running script throws.
+    await page.fill('.script-editor', 'let n = 0;\nwhile (true) { await or.here(); if (++n % 500 === 0) print(n); }');
+    await page.locator('.script-editor').press('Control+Enter');
+    await page.waitForSelector('.script-output .out-print:has-text("500")');
+    await page.locator('.script-console button', { hasText: 'Stop' }).click();
+    await page.waitForSelector('.script-output .out-error:has-text("Script stopped")');
+    // ↑ in an empty editor recalls the last script.
+    await page.fill('.script-editor', '');
+    await page.locator('.script-editor').press('ArrowUp');
+    if (!(await page.inputValue('.script-editor')).startsWith('let n = 0;')) throw new Error('history');
+    await page.locator('.script-console .close').click();
+    await page.waitForSelector('.script-console', { state: 'detached' });
+  });
   const CXX = fileURLToPath(new URL('../fixtures/cxx-symbols', import.meta.url));
   await step('C++ names: demangled everywhere, mangled in tooltips, go to by either', async () => {
     await page.locator('.brand').click();
