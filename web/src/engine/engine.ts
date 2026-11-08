@@ -26,6 +26,22 @@ export class Engine {
     await this.workspace.init();
   }
 
+  /** Parallel decompile workers for binaries opened from now on (1 = all in the engine thread). */
+  threads = Engine.defaultThreads();
+
+  static defaultThreads(): number {
+    if (typeof Worker === 'undefined') return 1; // no nested workers (older Safari)
+    const cores = (typeof navigator !== 'undefined' && navigator.hardwareConcurrency) || 2;
+    return Math.max(2, Math.min(4, cores - 1));
+  }
+
+  /** Set the number of decompile workers (0 = automatic). Applies when a binary is next opened. */
+  setThreads(n: number): { threads: number; applies: 'next-open' } {
+    const max = typeof Worker === 'undefined' ? 1 : 8;
+    this.threads = n > 0 ? Math.max(1, Math.min(max, Math.floor(n))) : Engine.defaultThreads();
+    return { threads: this.threads, applies: 'next-open' };
+  }
+
   #session(id: string): Promise<AnalysisSession> {
     let s = this.#sessions.get(id);
     if (!s) {
@@ -33,7 +49,7 @@ export class Engine {
         const record = this.workspace.get(id);
         if (!record) throw new ApiError(404, `Unknown binary ${id}`);
         await this.workspace.load(id);
-        return AnalysisSession.open(this.workspace, record);
+        return AnalysisSession.open(this.workspace, record, this.threads);
       })();
       this.#sessions.set(id, s);
       s.catch(() => this.#sessions.delete(id));
@@ -172,7 +188,11 @@ export class Engine {
   }
 
   async decompile(bid: string, fid: string, options: DecompileOptions, signal?: AbortSignal) {
-    return (await this.#session(bid)).decompile(fid, options, signal);
+    const s = await this.#session(bid);
+    // OpenDecomp cancels a running job by restarting the project owner. With helper
+    // workers the owner is not blocked, so a decompile the UI navigated away from just
+    // finishes in the background (and fills the cache) instead.
+    return s.decompile(fid, options, s.threads > 1 ? undefined : signal);
   }
 
   async xrefs(bid: string, target: Target, direction: 'incoming' | 'outgoing' | 'both' = 'incoming') {

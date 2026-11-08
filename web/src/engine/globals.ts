@@ -56,6 +56,61 @@ g.process ??= {
   stderr: { write: () => true, writableLength: 0 },
 };
 
+// The polyfill encodes and decodes UTF-8 in JavaScript; OpenDecomp frames every worker
+// message through it. Use the native TextEncoder/TextDecoder for the common cases.
+{
+  const enc = new TextEncoder();
+  const dec = new TextDecoder();
+  const isUtf8 = (e: unknown) => e === undefined || e === 'utf8' || e === 'utf-8';
+  const B = Buffer as unknown as Record<string, (...a: unknown[]) => unknown>;
+  const from = B.from!;
+  B.from = function (value: unknown, enc2?: unknown, len?: unknown) {
+    if (typeof value === 'string' && isUtf8(enc2)) {
+      const bytes = enc.encode(value);
+      return Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+    }
+    return from.call(Buffer, value, enc2, len);
+  };
+  const byteLength = B.byteLength!;
+  B.byteLength = function (value: unknown, enc2?: unknown) {
+    if (typeof value === 'string' && isUtf8(enc2)) {
+      // UTF-8 length without allocating: count code units by range.
+      let n = 0;
+      for (let i = 0; i < value.length; i++) {
+        const c = value.charCodeAt(i);
+        if (c < 0x80) n += 1;
+        else if (c < 0x800) n += 2;
+        else if (c >= 0xd800 && c <= 0xdbff && i + 1 < value.length && (value.charCodeAt(i + 1) & 0xfc00) === 0xdc00) {
+          n += 4;
+          i++;
+        } else n += 3;
+      }
+      return n;
+    }
+    return byteLength.call(Buffer, value, enc2);
+  };
+  const proto = Buffer.prototype as unknown as {
+    toString: (e?: string, s?: number, t?: number) => string;
+    write: (str: string, offset?: unknown, length?: unknown, encoding?: unknown) => number;
+  };
+  const toString = proto.toString;
+  proto.toString = function (this: Uint8Array, e?: string, start?: number, end?: number) {
+    if (isUtf8(e)) {
+      const s0 = Math.max(0, start ?? 0);
+      const e0 = Math.min(this.length, end ?? this.length);
+      return s0 >= e0 ? '' : dec.decode(this.subarray(s0, e0));
+    }
+    return toString.call(this, e, start, end);
+  };
+  const write = proto.write;
+  proto.write = function (this: Uint8Array, str: string, offset?: unknown, length?: unknown, encoding?: unknown) {
+    if (typeof offset === 'number' && length === undefined && encoding === undefined)
+      return enc.encodeInto(str, this.subarray(offset)).written;
+    if (offset === undefined && length === undefined) return enc.encodeInto(str, this).written;
+    return write.call(this, str, offset, length, encoding);
+  };
+}
+
 // Node timers return handles with unref()/ref(); OpenDecomp calls them.
 class Timeout {
   readonly id: number;

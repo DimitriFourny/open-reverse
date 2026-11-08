@@ -67,8 +67,45 @@ function openDecompBrowser(): Plugin {
       const file = id.split('?')[0]!;
       if (!file.startsWith(OD)) return null;
       // Each in-thread "child process" gets its own process object.
+      // A failure outside a command's own error reply stops the owner; say why in the console.
       if (file.endsWith('/workers/runtime.js'))
-        return replaceOnce(code, 'export function runProjectWorker(handler, observer) {', 'export function runProjectWorker(handler, observer, process = globalThis.process) {', file);
+        return replaceOnce(
+          replaceOnce(code, 'export function runProjectWorker(handler, observer) {', 'export function runProjectWorker(handler, observer, process = globalThis.process) {', file),
+          '            .catch(() => {\n            process.exitCode = 1;',
+          "            .catch((__error) => {\n            console.error('[open-reverse] project owner stopped', __error);\n            process.exitCode = 1;",
+          file,
+        );
+      // records() decodes every stored record of a kind on each call (xrefs_get: all
+      // references, ~2.3 s per query on a 160 KB binary even in Node). Records of a revision
+      // are immutable, so keep them per store/revision/image/kind. A hit still makes the
+      // dependency read `rereadScopes` makes (one row) and charges the same work units, so
+      // readsets, budgets and output are unchanged.
+      if (file.endsWith('/service/queries/scope.js'))
+        return replaceOnce(
+          code,
+          'export function records(scope, revision, image_id, kind) {\n    const items = [];',
+          `const __recordsMemo = new WeakMap();
+export function records(scope, revision, image_id, kind) {
+    let __byStore = __recordsMemo.get(scope.store);
+    if (!__byStore) __recordsMemo.set(scope.store, (__byStore = new Map()));
+    const __key = revision + '|' + image_id + '|' + kind;
+    const __hit = __byStore.get(__key);
+    if (__hit) {
+        scope.store.queryRecords({ kind, image_id, revision, limit: 1 });
+        for (let i = 0; i < __hit.charges; i++) scope.context.checkpoint(1);
+        return { items: __hit.items.slice(), state: __hit.state };
+    }
+    let __charges = 0;
+    const __context = scope.context;
+    const __result = __recordsUncached({ store: scope.store, context: { checkpoint: (n) => { __charges++; __context.checkpoint(n); } } }, revision, image_id, kind);
+    if (__byStore.size > 64) __byStore.delete(__byStore.keys().next().value);
+    __byStore.set(__key, { items: __result.items.slice(), state: __result.state, charges: __charges });
+    return __result;
+}
+function __recordsUncached(scope, revision, image_id, kind) {
+    const items = [];`,
+          file,
+        );
       // The C++ demangler's WASM is fetched as a bundled asset.
       if (file.endsWith('/metadata/symbols/index.js'))
         return `import __geckoWasmUrl from 'gecko-profiler-demangle/index_bg.wasm?url';\n${replaceOnce(

@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { ExportMenu, ImportArchiveButton, importArchive, isProjectArchive, RecentActions, StoragePanel, TaskDialog, UsageCell } from './components/DataTools.tsx';
+import { api } from './api.ts';
 import { Dialogs } from './components/Dialogs.tsx';
 import { Sidebar } from './components/Sidebar.tsx';
 import { XrefsPanel } from './components/XrefsPanel.tsx';
@@ -20,6 +21,7 @@ import {
   setState,
   setView,
   togglePseudo,
+  toast,
   uploadAndOpen,
   useStore,
   type ViewMode,
@@ -147,7 +149,61 @@ function Home() {
         )}
         <h2>Storage</h2>
         <StoragePanel />
+        <h2>Performance</h2>
+        <ThreadsPanel />
       </div>
+    </div>
+  );
+}
+
+const THREADS_KEY = 'open-reverse.threads';
+
+/** Saved decompile worker count (0 = automatic). */
+export function savedThreads(): number {
+  try {
+    return Number(localStorage.getItem(THREADS_KEY) ?? 0) || 0;
+  } catch {
+    return 0;
+  }
+}
+
+function ThreadsPanel() {
+  const [choice, setChoice] = useState(savedThreads);
+  const [effective, setEffective] = useState<number | null>(null);
+  useEffect(() => {
+    void api.setThreads(choice).then((r) => setEffective(r.threads), () => undefined);
+  }, [choice]);
+  const cores = navigator.hardwareConcurrency || 2;
+  return (
+    <div className="storage-panel">
+      <div className="storage-line">
+        <span>Decompile workers</span>
+        <select
+          value={choice}
+          onChange={(e) => {
+            const n = Number(e.target.value);
+            try {
+              localStorage.setItem(THREADS_KEY, String(n));
+            } catch {
+              // preference only
+            }
+            setChoice(n);
+          }}
+        >
+          <option value={0}>Automatic{effective !== null && choice === 0 ? ` (${effective})` : ''}</option>
+          <option value={1}>1 (engine thread only)</option>
+          {[2, 3, 4, 6, 8].map((n) => (
+            <option key={n} value={n}>
+              {n}
+            </option>
+          ))}
+        </select>
+        <span className="dim">{cores} logical cores</span>
+      </div>
+      <p className="storage-hint dim">
+        Decompiles run in parallel Web Workers, so navigation stays responsive while a large function decompiles and exports use every worker.
+        Each worker keeps its own copy of the project in memory. Applies when a binary is next opened.
+      </p>
     </div>
   );
 }
@@ -227,6 +283,7 @@ function StatusBar() {
   const revision = useStore((s) => s.revision);
   const count = useStore((s) => s.functions.length);
   const open = useStore((s) => !!s.info);
+  const threads = useStore((s) => s.info?.threads ?? 1);
   const toast = useStore((s) => s.toast);
   const [, tick] = useState(0);
   useEffect(() => {
@@ -247,6 +304,7 @@ function StatusBar() {
       {open && (
         <span className="dim">
           {count} functions · rev {revision}
+          {threads > 1 ? ` · ${threads} workers` : ''}
         </span>
       )}
       {showToast && <span className={`toast toast-${toast.kind}`}>{toast.text}</span>}
@@ -331,11 +389,19 @@ export function App() {
   const [sideW, setSideW] = useState(280);
   const [pseudoW, setPseudoW] = useState(() => Math.round(window.innerWidth * 0.42));
   useKeyboard();
+  useEffect(() => {
+    const onStorageError = (e: Event) => toast((e as CustomEvent<string>).detail, 'error');
+    addEventListener('open-reverse:storage-error', onStorageError);
+    return () => removeEventListener('open-reverse:storage-error', onStorageError);
+  }, []);
 
   useEffect(() => {
-    void refreshBinaries();
-    const h = parseHash();
-    if (h.bid) void openBinary(h.bid, { addr: h.addr, view: h.view });
+    void (async () => {
+      await api.setThreads(savedThreads()).catch(() => undefined);
+      void refreshBinaries();
+      const h = parseHash();
+      if (h.bid) void openBinary(h.bid, { addr: h.addr, view: h.view });
+    })();
   }, []);
 
   if (!bid)
