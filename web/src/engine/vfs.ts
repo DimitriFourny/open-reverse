@@ -217,12 +217,26 @@ export class VFS {
     this.#schedule();
   }
 
+  /** Called when a background flush fails (e.g. QuotaExceededError); changes stay dirty and are retried. */
+  onFlushError: ((error: unknown) => void) | null = null;
+
+  /** First unflushed change since the last flush (for the maximum wait). */
+  #dirtySince = 0;
+
+  /**
+   * Flush 3 s after the last change, and at least every 30 s while changes keep coming.
+   * A flush serializes every open database, so a busy analysis must not trigger one per write.
+   */
   #schedule(): void {
-    if (!this.#persist || this.#flushTimer) return;
+    if (!this.#persist) return;
+    const now = Date.now();
+    if (!this.#flushTimer) this.#dirtySince = now;
+    else clearTimeout(this.#flushTimer);
+    const delay = Math.max(0, Math.min(3000, this.#dirtySince + 30000 - now));
     this.#flushTimer = setTimeout(() => {
       this.#flushTimer = null;
-      void this.flush();
-    }, 3000);
+      this.flush().catch((error: unknown) => this.onFlushError?.(error));
+    }, delay);
   }
 
   /** Write dirty files (and the current bytes of live databases) to IndexedDB. */
@@ -277,6 +291,29 @@ export class VFS {
     tx.objectStore(STORE).delete(root);
     tx.objectStore(STORE).delete(IDBKeyRange.bound(`${root}/`, `${root}/￿`));
     await done(tx);
+  }
+
+  /** Helper workers keep a private, memory-only filesystem: never touch IndexedDB. */
+  disablePersistence(): void {
+    this.#persist = false;
+    if (this.#flushTimer) clearTimeout(this.#flushTimer);
+    this.#flushTimer = null;
+  }
+
+  /** Paths of the regular files at or under `prefix`, optionally skipping live databases. */
+  files(prefix: string, opts: { skipLive?: boolean } = {}): string[] {
+    const root = this.norm(prefix);
+    const out: string[] = [];
+    for (const [p, n] of this.nodes)
+      if (n.kind === 'file' && (p === root || p.startsWith(`${root}/`)) && !(opts.skipLive && this.live.has(p))) out.push(p);
+    return out;
+  }
+
+  /** Write a file, creating its parent directories. */
+  put(path: string, data: Uint8Array): void {
+    const p = this.norm(path);
+    this.mkdir(posix.dirname(p), true);
+    this.write(p, data);
   }
 
   // --------------------------------------------------------------- queries

@@ -130,6 +130,47 @@ function errorMessages(result: unknown): string {
 
 const AUTHOR = 'open-reverse';
 
+/**
+ * Shared/exclusive gate. Decompiles run concurrently in request workers (shared); an
+ * image-wide analysis in the project owner (binary_info `types`) publishes the same
+ * per-function analyses, so it runs exclusively: two producers of one cache key would
+ * collide in OpenDecomp's store.
+ */
+export class Gate {
+  #shared = 0;
+  #exclusive: Promise<void> | null = null;
+  #drained: (() => void) | null = null;
+
+  async shared<T>(fn: () => Promise<T>): Promise<T> {
+    while (this.#exclusive) await this.#exclusive;
+    this.#shared++;
+    try {
+      return await fn();
+    } finally {
+      if (--this.#shared === 0) this.#drained?.();
+    }
+  }
+
+  async exclusive<T>(fn: () => Promise<T>): Promise<T> {
+    while (this.#exclusive) await this.#exclusive;
+    let release!: () => void;
+    this.#exclusive = new Promise<void>((r) => (release = r));
+    try {
+      if (this.#shared > 0) await new Promise<void>((r) => (this.#drained = r));
+      this.#drained = null;
+      return await fn();
+    } finally {
+      this.#exclusive = null;
+      release();
+    }
+  }
+}
+
+/** The revision part of a decompile cache key (`fid|revision|language|inference|view`). */
+function k_rev(key: string): number {
+  return Number(key.split('|')[1]);
+}
+
 function annotationId(key: string): string {
   return `annotation_${createHash('sha256').update(key).digest('hex')}`;
 }
@@ -137,6 +178,9 @@ function annotationId(key: string): string {
 export class AnalysisSession {
   readonly record: BinaryRecord;
   readonly binary: BinarySession;
+  /** Parallel decompile workers this session was opened with. */
+  threads = 1;
+  readonly gate = new Gate();
   readonly #workspace: Workspace;
   readonly #writes = new Mutex();
   discovery: DiscoveryStatus = { state: 'idle', message: null };
@@ -152,11 +196,14 @@ export class AnalysisSession {
     this.binary = binary;
   }
 
-  static async open(workspace: Workspace, record: BinaryRecord): Promise<AnalysisSession> {
+  static async open(workspace: Workspace, record: BinaryRecord, threads = 1): Promise<AnalysisSession> {
     const binary = await openBinary(workspace.binaryPath(record), {
       cachePath: workspace.projectRoot(record.id),
+      // Above 1, decompiles run in that many helper Web Workers (OpenDecomp request workers).
+      ...(threads > 1 ? { requestWorkers: threads } : {}),
     });
     const session = new AnalysisSession(workspace, record, binary);
+    session.threads = threads;
     void session.#discover();
     return session;
   }
@@ -275,6 +322,7 @@ export class AnalysisSession {
       functionCount: index.list.length,
       functionIndex: index.indexState,
       discovery: this.discovery,
+      threads: this.threads,
     };
   }
 
@@ -397,7 +445,7 @@ export class AnalysisSession {
 
   /** Recovered image types (merged `struct_<hex>`) and the image's type library. */
   async types(): Promise<{ text: string; state: string; libraryId: string | null; library: LibraryType[] }> {
-    const result = await this.binary.types();
+    const result = await this.gate.exclusive(() => this.binary.types());
     type Row = { name: string | null; type_id: string; annotation_id: string; status: string; declaration: string };
     const data = need(result) as { text?: string; library_id?: string; library?: Row[] };
     const library = (data.library ?? []).map((r) => ({
@@ -559,7 +607,46 @@ export class AnalysisSession {
 
   // -------------------------------------------------------------- decompile
 
-  async decompile(
+  /** Identical decompiles in flight share one job: with request workers two of them would run
+   * in parallel and the second publication would collide with the first in the cache. */
+  readonly #results = new Map<string, Promise<Awaited<ReturnType<AnalysisSession['decompileOnce']>>>>();
+  readonly #inflight = new Map<string, Promise<Awaited<ReturnType<AnalysisSession['decompileOnce']>>>>();
+
+  decompile(
+    functionId: string,
+    options: { language: 'c-like' | 'python-like'; inference: 'proven' | 'likely'; view: 'source' | 'checked' },
+    signal?: AbortSignal,
+  ) {
+    const key = `${functionId}|${this.binary.revision}|${options.language}|${options.inference}|${options.view}`;
+    // A repeat at the same revision is answered here: a request worker's snapshot predates
+    // publications made since its generation started, so OpenDecomp would recompute it and
+    // its publication would collide with the first in the store.
+    const done = this.#results.get(key);
+    if (done) {
+      this.#results.delete(key);
+      this.#results.set(key, done);
+      return done;
+    }
+    let p = this.#inflight.get(key);
+    if (!p) {
+      p = this.gate.shared(() => this.decompileOnce(functionId, options, signal));
+      this.#inflight.set(key, p);
+      const clear = () => {
+        if (this.#inflight.get(key) === p) this.#inflight.delete(key);
+      };
+      p.then((value) => {
+        clear();
+        // Keep recent results of the current revision (older revisions are never asked again).
+        const prefix = `|${this.binary.revision}|`;
+        for (const k of this.#results.keys()) if (!k.includes(prefix)) this.#results.delete(k);
+        if (k_rev(key) === this.binary.revision) this.#results.set(key, Promise.resolve(value));
+        while (this.#results.size > 256) this.#results.delete(this.#results.keys().next().value!);
+      }, clear);
+    }
+    return p;
+  }
+
+  async decompileOnce(
     functionId: string,
     options: { language: 'c-like' | 'python-like'; inference: 'proven' | 'likely'; view: 'source' | 'checked' },
     signal?: AbortSignal,

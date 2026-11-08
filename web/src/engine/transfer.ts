@@ -72,12 +72,19 @@ export async function exportPseudocode(
         return async (id: string, ...rest: unknown[]) => {
           ctx.progress({ phase: 'decompile', done, total, detail: names.get(id) ?? id });
           try {
-            return await (t.decompileFunction as (...a: unknown[]) => Promise<unknown>).call(t, id, ...rest);
+            // OpenDecomp's job deadline counts from submission, queueing for a helper included,
+            // and an expired job restarts the project owner (failing every request in flight).
+            // Give export decompiles the longest deadline OpenDecomp accepts.
+            const [opts, ...more] = rest as [{ budget?: Record<string, unknown> } | undefined, ...unknown[]];
+            const withDeadline = { ...opts, budget: { deadline_ms: 300_000, ...opts?.budget } };
+            return await session.gate.shared(() => (t.decompileFunction as (...a: unknown[]) => Promise<unknown>).call(t, id, withDeadline, ...more));
           } finally {
             done++;
             ctx.progress({ phase: 'decompile', done, total, detail: names.get(id) ?? id });
           }
         };
+      if (key === 'types' || key === 'typeDeclarations')
+        return (...args: unknown[]) => session.gate.exclusive(() => (t[key] as (...a: unknown[]) => Promise<unknown>).apply(t, args));
       const value = Reflect.get(t, key, t) as unknown;
       return typeof value === 'function' ? (value as (...a: unknown[]) => unknown).bind(t) : value;
     },
@@ -88,7 +95,7 @@ export async function exportPseudocode(
   try {
     const summary = await exportBinary(
       reporting,
-      { out, language: options.language, inference: options.inference, jobs: 1 },
+      { out, language: options.language, inference: options.inference, jobs: session.threads > 1 ? 2 : 1 },
       ctx.signal,
       (message: string) => {
         const m = /^export: (\d+) functions/.exec(message);

@@ -5,6 +5,8 @@
 
 import { Buffer } from 'buffer';
 import { EventEmitter } from 'events';
+import { parseFrames, type HelperIn, type HelperOut, type ShippedFile } from '../helper-protocol.ts';
+import { vfs } from '../vfs.ts';
 
 let nextPid = 1000;
 
@@ -108,6 +110,7 @@ export class FakeChild extends EventEmitter {
   killed = false;
   readonly proc: ChildProcessGlobal;
   #dead = false;
+  #endSent = false;
   #ready = false;
   #pending: (() => void)[] = [];
 
@@ -136,7 +139,12 @@ export class FakeChild extends EventEmitter {
   }
 
   endChildInput(): void {
-    const fn = () => later(() => !this.#dead && guard(this, () => this.proc.stdin.emit('end')));
+    const fn = () =>
+      later(() => {
+        if (this.#dead || this.#endSent) return;
+        this.#endSent = true;
+        guard(this, () => this.proc.stdin.emit('end'));
+      });
     if (this.#ready) fn();
     else this.#pending.push(fn);
   }
@@ -150,6 +158,12 @@ export class FakeChild extends EventEmitter {
 
   childExited(code: number | null, signal: string | null): void {
     if (this.#dead) return;
+    // A dead Node process releases what it held. In this shared thread, closing the
+    // runtime's stdin runs its own teardown (stop request workers, close the store).
+    if (this.#ready && !this.#endSent) {
+      this.#endSent = true;
+      guard(this, () => this.proc.stdin.emit('end'));
+    }
     this.#dead = true;
     this.exitCode = code;
     this.signalCode = signal;
@@ -198,10 +212,94 @@ function watchReady(child: FakeChild): void {
   check();
 }
 
-export function spawn(command: string, args: string[] = []): FakeChild {
+// ------------------------------------------------------------- remote children
+// OpenDecomp's request workers run in their own Web Workers (engine/helper.ts),
+// giving real parallelism. Their files cross over with the protocol frames.
+
+const remotes: { match: RegExp; create: () => Worker }[] = [];
+
+/** Run spawned scripts matching `match` in a Web Worker made by `create`. */
+export function registerRemoteEntry(match: RegExp, create: () => Worker): void {
+  remotes.push({ match, create });
+}
+
+class RemoteChild extends EventEmitter {
+  readonly pid = nextPid++;
+  readonly stdout = new EventEmitter();
+  readonly stderr = Object.assign(new EventEmitter(), { resume() {}, pause() {} });
+  readonly stdin: EventEmitter & { writableLength: number; write: (c: Uint8Array | string, e?: string | WriteCb, cb?: WriteCb) => boolean; end: () => void; destroy: () => void };
+  exitCode: number | null = null;
+  signalCode: string | null = null;
+  killed = false;
+  readonly #worker: Worker;
+  #dead = false;
+
+  constructor(worker: Worker) {
+    super();
+    this.#worker = worker;
+    const post = (msg: HelperIn, transfer: Transferable[] = []) => {
+      if (!this.#dead) worker.postMessage(msg, transfer);
+    };
+    this.stdin = Object.assign(new EventEmitter(), {
+      writableLength: 0,
+      write: (chunk: Uint8Array | string, encodingOrCb?: string | WriteCb, cb?: WriteCb): boolean => {
+        const done = typeof encodingOrCb === 'function' ? encodingOrCb : cb;
+        const bytes = typeof chunk === 'string' ? new Uint8Array(Buffer.from(chunk)) : Uint8Array.from(chunk);
+        for (const value of parseFrames(bytes) as { kind?: string; project?: string; database?: string }[]) {
+          if (value.kind !== 'open' || !value.project || !value.database) continue;
+          // The request worker reads the snapshot database and the project's images/artifacts.
+          const paths = [value.database, ...vfs.files(value.project, { skipLive: true })];
+          const files: ShippedFile[] = paths.filter((p) => vfs.get(p)).map((path) => ({ path, data: vfs.read(path).slice() }));
+          post({ type: 'files', files }, files.map((f) => f.data.buffer as ArrayBuffer));
+        }
+        post({ type: 'stdin', bytes }, [bytes.buffer as ArrayBuffer]);
+        later(() => done?.(null));
+        return true;
+      },
+      end: () => post({ type: 'end' }),
+      destroy: () => post({ type: 'end' }),
+    });
+    worker.onmessage = (event: MessageEvent<HelperOut>) => {
+      const msg = event.data;
+      if (msg.type === 'stdout') {
+        // Files first: the frame names them and the owner reads them on receipt.
+        for (const f of msg.files) vfs.put(f.path, f.data);
+        if (!this.#dead) this.stdout.emit('data', Buffer.from(msg.bytes));
+      } else if (msg.type === 'exit') this.#exited(msg.code, null);
+      else if (msg.type === 'log') console[msg.level](`[helper] ${msg.text}`);
+    };
+    worker.onerror = (e) => {
+      console.error('[open-reverse] request worker crashed', e.message);
+      this.#exited(1, null);
+    };
+  }
+
+  #exited(code: number | null, signal: string | null): void {
+    if (this.#dead) return;
+    this.#dead = true;
+    this.exitCode = code;
+    this.signalCode = signal;
+    this.#worker.terminate();
+    later(() => {
+      this.emit('exit', code, signal);
+      this.emit('close', code, signal);
+    });
+  }
+
+  kill(signal: string = 'SIGTERM'): boolean {
+    if (this.#dead) return false;
+    this.killed = true;
+    this.#exited(null, signal);
+    return true;
+  }
+}
+
+export function spawn(command: string, args: string[] = []): FakeChild | RemoteChild {
   const argv = [command, ...args];
-  const child = new FakeChild(argv);
   const script = args.at(-1) ?? '';
+  const remote = remotes.find((r) => r.match.test(script));
+  if (remote) return new RemoteChild(remote.create());
+  const child = new FakeChild(argv);
   const entry = entries.find((e) => e.match.test(script));
   later(async () => {
     if (!entry) {

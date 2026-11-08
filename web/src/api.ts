@@ -41,6 +41,8 @@ export interface ImageInfo {
   functionCount: number;
   functionIndex: string;
   discovery: Discovery;
+  /** Decompile workers this binary was opened with (1 = in the engine thread). */
+  threads?: number;
 }
 
 export interface OperandRef {
@@ -171,7 +173,7 @@ export interface DecompileOptions {
 // Everything runs in a Web Worker in this tab (engine/worker.ts): OpenDecomp,
 // SQLite and the projects in IndexedDB. Nothing is sent to a server.
 
-import type { RpcResponse } from './engine/worker.ts';
+import type { RpcResponse } from './engine/engine-worker.ts';
 import type { TaskProgress } from './engine/tasks.ts';
 
 export type { TaskProgress };
@@ -198,6 +200,10 @@ function boot(): Worker {
       if (msg.event === 'progress') pending.get(msg.id)?.onProgress?.(msg.progress);
       else if (msg.event === 'ready') readyState?.resolve();
       else if (msg.event === 'log') console[msg.level](`[engine] ${msg.text}`);
+      else if (msg.event === 'storage-error') {
+        console.warn(`[engine] ${msg.text}`);
+        dispatchEvent(new CustomEvent('open-reverse:storage-error', { detail: msg.text }));
+      }
       else readyState?.reject(new Error(msg.error));
       return;
     }
@@ -247,6 +253,7 @@ function call<T>(method: string, args: unknown[], signal?: AbortSignal, transfer
 }
 
 export const api = {
+  setThreads: (n: number) => call<{ threads: number }>('setThreads', [n]),
   binaries: () => call<{ binaries: BinaryRecord[]; open: string[] }>('binaries', []),
   upload: async (file: File) => {
     const bytes = new Uint8Array(await file.arrayBuffer());
