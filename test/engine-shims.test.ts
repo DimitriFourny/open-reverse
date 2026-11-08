@@ -105,6 +105,15 @@ describe('node:sqlite shim', () => {
     assert.equal(copy.prepare('SELECT count(*) AS c FROM r').get()!.c, 101);
     copy.close();
     again.close();
+    // An open database is held once (in SQLite); closing it unchanged gives its bytes back.
+    const unchanged = new DatabaseSync('/db/copy.sqlite');
+    assert.equal(vfs.get('/db/copy.sqlite')!.data.length, 0, 'the VFS node drops its copy while live');
+    assert.ok(fs.statSync('/db/copy.sqlite').size > 0, 'a live file reports the database size');
+    unchanged.close();
+    assert.ok(vfs.get('/db/copy.sqlite')!.data.length > 0);
+    const reread = new DatabaseSync('/db/copy.sqlite', { readOnly: true });
+    assert.equal(reread.prepare('SELECT count(*) AS c FROM r').get()!.c, 101);
+    reread.close();
   });
 
   test('rename and unlink of a live database', () => {

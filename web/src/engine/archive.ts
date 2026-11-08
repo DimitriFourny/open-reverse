@@ -15,7 +15,9 @@
 // only, no duplicate, absolute, `..`, backslash or control-character paths,
 // size limits, the binary hash, the record and the comments.
 
-import { sanitizeFileName } from './workspace.ts';
+import { sanitizeFileName, sha256Hex } from './workspace.ts';
+
+export { sha256Hex };
 import { DEFAULT_ZIP_LIMITS, ZipError, zipDecode, zipEncode, type ZipEntry, type ZipLimits } from './zip.ts';
 
 export const ARCHIVE_FORMAT = 'open-reverse-project';
@@ -80,10 +82,6 @@ export function safeRelativePath(path: string): string | null {
   return segments.join('/');
 }
 
-export async function sha256Hex(bytes: Uint8Array): Promise<string> {
-  const digest = new Uint8Array(await crypto.subtle.digest('SHA-256', bytes as Uint8Array<ArrayBuffer>));
-  return [...digest].map((b) => b.toString(16).padStart(2, '0')).join('');
-}
 
 /** File name to save an archive under. */
 export function archiveFileName(record: { name: string }): string {

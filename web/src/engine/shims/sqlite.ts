@@ -24,6 +24,30 @@ function api(): Sqlite3Static {
 
 type Value = null | number | bigint | string | Uint8Array;
 
+const SQLITE_SERIALIZE_NOCOPY = 1;
+
+/**
+ * The bytes of `db`'s main database. A deserialized (memdb) database is copied straight
+ * out of its own buffer; `sqlite3_js_db_export` would first copy it inside WASM memory,
+ * which then never shrinks, so each export would ratchet the heap up by a database size.
+ */
+function exportDb(db: Database): Uint8Array {
+  const s = api();
+  const scope = s.wasm.scopedAllocPush();
+  try {
+    const pSize = s.wasm.scopedAlloc(8);
+    const p = s.capi.sqlite3_serialize(db.pointer!, 'main', pSize, SQLITE_SERIALIZE_NOCOPY);
+    if (p) {
+      const n = Number(s.wasm.peek(pSize, 'i64'));
+      return s.wasm.heap8u().slice(Number(p), Number(p) + n);
+    }
+  } finally {
+    s.wasm.scopedAllocPop(scope);
+  }
+  // Not a memdb (a database created empty in this session): SQLite serializes a copy.
+  return s.capi.sqlite3_js_db_export(db.pointer!);
+}
+
 class Shared {
   path: string | null;
   readonly db: Database;
@@ -66,8 +90,12 @@ class Shared {
         this.path = null;
       },
       busy: () => s.capi.sqlite3_get_autocommit(this.db.pointer!) === 0,
-      peek: () => s.capi.sqlite3_js_db_export(this.db.pointer!),
+      peek: () => exportDb(this.db),
     });
+    // While live, the VFS takes the file's bytes from the database, never from the node:
+    // drop the node's copy so an open database is held once (in WASM memory), not twice.
+    // `release` exports the bytes back when the node is empty.
+    if (existing && existing.kind === 'file') existing.data = new Uint8Array(0);
   }
   #total(): number {
     return api().capi.sqlite3_total_changes(this.db.pointer!);
@@ -84,7 +112,7 @@ class Shared {
     return this.#total() !== this.#exported || this.#execs !== this.#exportedExecs;
   }
   export(): Uint8Array {
-    const bytes = api().capi.sqlite3_js_db_export(this.db.pointer!);
+    const bytes = exportDb(this.db);
     this.#exported = this.#total();
     this.#exportedExecs = this.#execs;
     return bytes;

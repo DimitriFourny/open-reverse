@@ -51,7 +51,15 @@ export function randomBytes(n: number): Buffer {
   return b;
 }
 
-export const randomUUID = () => globalThis.crypto.randomUUID();
+/** `crypto.randomUUID` exists only in secure contexts; build a v4 UUID from random bytes otherwise. */
+export function randomUUID(): string {
+  if (typeof globalThis.crypto.randomUUID === 'function') return globalThis.crypto.randomUUID();
+  const b = globalThis.crypto.getRandomValues(new Uint8Array(16));
+  b[6] = (b[6]! & 0x0f) | 0x40;
+  b[8] = (b[8]! & 0x3f) | 0x80;
+  const h = [...b].map((x) => x.toString(16).padStart(2, '0')).join('');
+  return `${h.slice(0, 8)}-${h.slice(8, 12)}-${h.slice(12, 16)}-${h.slice(16, 20)}-${h.slice(20)}`;
+}
 
 export function timingSafeEqual(a: Uint8Array, b: Uint8Array): boolean {
   if (a.byteLength !== b.byteLength) throw new RangeError('Input buffers must have the same byte length');

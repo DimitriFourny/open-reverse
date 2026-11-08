@@ -6,6 +6,7 @@
 //   /workspace/binaries/<id>/<name>      the binary          (loaded on open)
 //   /workspace/binaries/<id>/project/    OpenDecomp cache root
 
+import { sha256 } from '@noble/hashes/sha2.js';
 import { vfs } from './vfs.ts';
 
 export interface BinaryRecord {
@@ -87,8 +88,7 @@ export class Workspace {
 
   /** Store a binary; identical contents map to the same record. */
   async add(name: string, bytes: Uint8Array): Promise<BinaryRecord> {
-    const digest = new Uint8Array(await crypto.subtle.digest('SHA-256', bytes as Uint8Array<ArrayBuffer>));
-    const sha256 = [...digest].map((b) => b.toString(16).padStart(2, '0')).join('');
+    const sha256 = await sha256Hex(bytes);
     const id = sha256.slice(0, 16);
     const existing = this.get(id);
     if (existing) return existing;
@@ -145,4 +145,13 @@ export class Workspace {
     writeJson(`${META}/${id}.comments.json`, comments);
     return comments;
   }
+}
+
+/** SHA-256 of `bytes` as hex. `crypto.subtle` exists only in secure contexts (HTTPS or
+ * localhost); a site served over plain HTTP hashes in JavaScript instead. */
+export async function sha256Hex(bytes: Uint8Array): Promise<string> {
+  const digest = globalThis.crypto?.subtle
+    ? new Uint8Array(await crypto.subtle.digest('SHA-256', bytes as Uint8Array<ArrayBuffer>))
+    : sha256(bytes);
+  return [...digest].map((b) => b.toString(16).padStart(2, '0')).join('');
 }

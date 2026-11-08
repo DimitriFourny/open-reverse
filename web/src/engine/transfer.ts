@@ -95,7 +95,7 @@ export async function exportPseudocode(
   try {
     const summary = await exportBinary(
       reporting,
-      { out, language: options.language, inference: options.inference, jobs: session.threads > 1 ? session.threads * 2 : 1 },
+      { out, language: options.language, inference: options.inference, jobs: session.threads > 1 ? 2 : 1 },
       ctx.signal,
       (message: string) => {
         const m = /^export: (\d+) functions/.exec(message);
