@@ -5,6 +5,7 @@ import { ArchiveError, archiveFileName, decodeProjectArchive, encodeProjectArchi
 import { canon, parseAddress } from './hex.ts';
 import { AnalysisSession, ApiError, type AnnotationSnapshot, type DataAction } from './session.ts';
 import { vfs } from './vfs.ts';
+import type { SearchQuery } from './search.ts';
 import type { TaskContext } from './tasks.ts';
 import { exportPseudocode, snapshotProject, storageUsage } from './transfer.ts';
 import type { DataDef } from './linear.ts';
@@ -254,6 +255,17 @@ export class Engine {
 
   async memory(bid: string, a: string, length: number) {
     return (await this.#session(bid)).memory(addr(a), Number(length) || 4096);
+  }
+
+  /** Search the image's bytes (pattern, text) or every function's operands (immediate). Hits stream as progress items. */
+  async search(bid: string, query: SearchQuery, ctx: TaskContext) {
+    if (!query || typeof query.text !== 'string' || !['bytes', 'text', 'immediate'].includes(query.mode)) throw new ApiError(400, 'Invalid search');
+    return (await this.#session(bid)).search(query, ctx);
+  }
+
+  /** The navigation strip's map of the image. */
+  async navMap(bid: string) {
+    return (await this.#session(bid)).navMap();
   }
 
   async comments(bid: string) {

@@ -12,6 +12,8 @@ export interface FunctionSummary {
   id: string;
   name: string;
   originalName: string | null;
+  /** The linkage name when it is mangled (the name shown is OpenDecomp's demangling, or a rename). */
+  mangled: string | null;
   renamed: boolean;
   entry: string;
   size: number;
@@ -181,6 +183,8 @@ export interface StringItem {
 export interface SymbolItem {
   id: string;
   name: string;
+  /** The linkage name when the name shown is a demangling. */
+  mangled: string | null;
   kind: string;
   addr: string | null;
   size: number;
@@ -196,6 +200,8 @@ export interface Section {
   fileOffset: string | null;
   fileSize: number;
   permissions: string[];
+  /** Holds code (Mach-O: by its section flags, not its segment's permissions). */
+  exec: boolean;
 }
 
 export interface MemoryChunk {
@@ -216,10 +222,11 @@ export interface DecompileOptions {
 
 import type { RpcResponse } from './engine/engine-worker.ts';
 import type { TaskProgress } from './engine/tasks.ts';
+import type { NavMap, SearchHit, SearchQuery, SearchResult } from './engine/search.ts';
 import type { DataDef, DataType, LinearRow, LinearWindow } from './engine/linear.ts';
 import type { DataAction } from './engine/session.ts';
 
-export type { DataAction, DataDef, DataType, LinearRow, LinearWindow, TaskProgress };
+export type { DataAction, DataDef, DataType, LinearRow, LinearWindow, NavMap, SearchHit, SearchQuery, SearchResult, TaskProgress };
 
 type Pending = { resolve: (v: unknown) => void; reject: (e: Error) => void; onProgress?: (p: TaskProgress) => void };
 let worker: Worker | null = null;
@@ -335,6 +342,10 @@ export const api = {
   sections: (bid: string) => call<{ sections: Section[] }>('sections', [bid]),
   types: (bid: string) => call<TypesInfo>('types', [bid]),
   memory: (bid: string, addr: string, length: number) => call<MemoryChunk>('memory', [bid, addr, length]),
+  /** Binary-wide search; hits also arrive in batches as progress `items` while it runs. */
+  search: (bid: string, query: SearchQuery, onProgress?: (p: TaskProgress) => void, signal?: AbortSignal) =>
+    call<SearchResult>('search', [bid, query], signal, [], onProgress),
+  navMap: (bid: string) => call<NavMap>('navMap', [bid]),
   comments: (bid: string) => call<{ comments: Record<string, string> }>('comments', [bid]),
   rename: (bid: string, target: { id?: string; addr?: string }, name: string) => call<{ revision: number; note: string | null }>('rename', [bid, target, name]),
   /** `annotations`: the library annotation of each declared name. */

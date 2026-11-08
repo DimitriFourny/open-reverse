@@ -37,6 +37,21 @@ export function cmpAddr(a: string, b: string): number {
   return x < y ? -1 : x > y ? 1 : 0;
 }
 
+/**
+ * How OpenDecomp's pseudocode spells a name as a C identifier (its source identifier
+ * stem): every other character becomes `_`, at most 64 characters, `value_` before a
+ * leading digit. `geom::area(int, int)` reads `geom__area_int__int_`.
+ */
+export function cIdentifier(name: string): string {
+  const stem = name.replace(/[^A-Za-z0-9_]/g, '_').slice(0, 64);
+  return /^[A-Za-z_]/.test(stem) ? stem : `value_${stem}`;
+}
+
+/** A tooltip line naming the mangled (linkage) name behind a demangled one. */
+export function mangledNote(mangled: string | null | undefined): string {
+  return mangled ? `\nmangled: ${mangled}` : '';
+}
+
 export function isEditableTarget(t: EventTarget | null): boolean {
   const el = t as HTMLElement | null;
   return !!el && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' || el.tagName === 'SELECT' || el.isContentEditable);

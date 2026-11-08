@@ -7,7 +7,7 @@ import { useVirtualizer } from '@tanstack/react-virtual';
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { api, type LinearRow, type LinearWindow } from '../api.ts';
 import { getState, navigate, setCursor, setState, toast, useStore, type Selection } from '../store.ts';
-import { padAddr } from '../util.ts';
+import { mangledNote, padAddr } from '../util.ts';
 import { FindBar, onCodeMouseDown, useCodeKeys, useFindPaint, useFindQuery } from './codeui.tsx';
 import { AutoComment, Mnemonic, Operands, autoComment, displayOperands, followFrom } from './disasm.tsx';
 
@@ -479,7 +479,7 @@ export function LinearView() {
                 >
                   {at}
                   {!row.chunk && (
-                    <span className="fn-title" data-k={`i:${row.name}`}>
+                    <span className="fn-title" data-k={`i:${row.name}`} title={`${row.name}${mangledNote(getState().byId.get(row.fnId)?.mangled)}`}>
                       {row.name}
                     </span>
                   )}

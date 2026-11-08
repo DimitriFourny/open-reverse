@@ -15,7 +15,7 @@ import {
   useStore,
   type Dialog,
 } from '../store.ts';
-import { cmpAddr, functionOffset, padAddr, parseAddress } from '../util.ts';
+import { cmpAddr, functionOffset, mangledNote, padAddr, parseAddress } from '../util.ts';
 
 function Modal({ title, children, onClose }: { title: string; children: React.ReactNode; onClose: () => void }) {
   return (
@@ -36,6 +36,8 @@ interface Target {
   name: string;
   entry: string;
   fnId: string | null;
+  /** The linkage name when `name` is its demangling. */
+  mangled?: string | null;
 }
 
 function GotoDialog() {
@@ -47,19 +49,22 @@ function GotoDialog() {
   useEffect(() => inputRef.current?.focus(), []);
   useEffect(() => void loadSidebar('symbols'), []);
   const targets = useMemo(() => {
-    const out: Target[] = functions.map((f) => ({ key: f.id, name: f.name, entry: f.entry, fnId: f.id }));
+    const out: Target[] = functions.map((f) => ({ key: f.id, name: f.name, entry: f.entry, fnId: f.id, mangled: f.mangled }));
     const entries = new Set(functions.map((f) => f.entry));
-    for (const s of symbols ?? []) if (s.name && s.addr && s.addr !== '0x0' && s.kind !== 'function' && !entries.has(s.addr)) out.push({ key: s.id, name: s.name, entry: s.addr, fnId: null });
+    for (const s of symbols ?? []) if (s.name && s.addr && s.addr !== '0x0' && s.kind !== 'function' && !entries.has(s.addr)) out.push({ key: s.id, name: s.name, entry: s.addr, fnId: null, mangled: s.mangled });
     return out;
   }, [functions, symbols]);
   const matches = useMemo(() => {
     const t = text.trim().toLowerCase();
     if (!t) return targets.slice(0, 50);
     const scored: [number, Target][] = [];
+    // Demangled and mangled names both match (`geom::area`, `_ZN4geom4areaEii`).
     for (const f of targets) {
       const n = f.name.toLowerCase();
       const i = n.indexOf(t);
+      const m = f.mangled?.toLowerCase().indexOf(t) ?? -1;
       if (i >= 0) scored.push([(i === 0 ? 0 : 1000) + n.length, f]);
+      else if (m >= 0) scored.push([(m === 0 ? 500 : 1500) + f.mangled!.length, f]);
       else if (f.entry.includes(t)) scored.push([2000, f]);
     }
     return scored.sort((a, b) => a[0] - b[0]).slice(0, 50).map(([, f]) => f);
@@ -69,8 +74,9 @@ function GotoDialog() {
   const [waiting, setWaiting] = useState(false);
   const go = (i: number) => {
     const f = matches[i];
+    const exact = (x: Target) => [x.name, x.mangled].some((n) => n?.toLowerCase() === text.trim().toLowerCase());
     if (!f && !addr && !symbols) return setWaiting(true);
-    if (f && (!addr || f.name.toLowerCase() === text.trim().toLowerCase())) {
+    if (f && (!addr || exact(f))) {
       close();
       void navigate(f.entry, f.fnId ? { fnId: f.fnId } : {});
     } else if (addr) {
@@ -98,15 +104,22 @@ function GotoDialog() {
         onKeyDown={(e) => {
           if (e.key === 'ArrowDown') (e.preventDefault(), setSel((s) => Math.min(s + 1, matches.length - 1)));
           else if (e.key === 'ArrowUp') (e.preventDefault(), setSel((s) => Math.max(s - 1, 0)));
-          else if (e.key === 'Enter') go(addr && !matches.some((m) => m.name.toLowerCase() === text.trim().toLowerCase()) ? -1 : sel);
+          else if (e.key === 'Enter') go(addr && !matches.some((m) => [m.name, m.mangled].some((n) => n?.toLowerCase() === text.trim().toLowerCase())) ? -1 : sel);
         }}
       />
       {addr && <div className="goto-hint dim">Enter: go to address {addr}</div>}
       <div className="goto-list">
         {matches.map((f, i) => (
-          <div key={f.key} className={`goto-item${i === sel ? ' active' : ''}`} onMouseEnter={() => setSel(i)} onClick={() => go(i)}>
-            <span>
+          <div
+            key={f.key}
+            className={`goto-item${i === sel ? ' active' : ''}`}
+            onMouseEnter={() => setSel(i)}
+            onClick={() => go(i)}
+            title={`${f.name}${mangledNote(f.mangled)}`}
+          >
+            <span className="goto-name">
               {f.name}
+              {f.mangled && text.trim() && !f.name.toLowerCase().includes(text.trim().toLowerCase()) && <span className="dim"> {f.mangled}</span>}
               {!f.fnId && <span className="dim"> · data</span>}
             </span>
             <span className="dim">{padAddr(f.entry)}</span>

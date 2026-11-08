@@ -4,7 +4,7 @@
 import { useEffect, useState } from 'react';
 import type { CallNode } from '../api.ts';
 import { loadCalls, navigate, showXrefs, useStore } from '../store.ts';
-import { padAddr } from '../util.ts';
+import { padAddr, mangledNote } from '../util.ts';
 
 type Direction = 'callers' | 'callees';
 type Children = { status: 'loading' } | { status: 'ready'; nodes: CallNode[] } | { status: 'error'; error: string };
@@ -112,6 +112,7 @@ function NodeRow({
   onToggle: () => void;
 }) {
   const stub = useStore((s) => (node.id ? !!s.byId.get(node.id)?.importStub : true));
+  const mangled = useStore((s) => (node.id ? s.byId.get(node.id) : s.byName.get(node.name))?.mangled);
   const go = () => {
     if (node.entry) void navigate(node.entry, node.id ? { fnId: node.id } : {});
   };
@@ -125,7 +126,7 @@ function NodeRow({
         e.preventDefault();
         void showXrefs({ id: node.id }, node.name);
       }}
-      title={`${node.name}${node.entry ? ` @ ${node.entry}` : ' (import)'} · ${node.sites} call site${node.sites === 1 ? '' : 's'}${recursive ? ' · recursive' : ''}`}
+      title={`${node.name}${node.entry ? ` @ ${node.entry}` : ' (import)'} · ${node.sites} call site${node.sites === 1 ? '' : 's'}${recursive ? ' · recursive' : ''}${mangledNote(mangled)}`}
     >
       <span
         className="call-twisty"

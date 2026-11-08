@@ -4,6 +4,9 @@ import { api } from './api.ts';
 import { Dialogs } from './components/Dialogs.tsx';
 import { Sidebar } from './components/Sidebar.tsx';
 import { XrefsPanel } from './components/XrefsPanel.tsx';
+import { NAV_LEGEND, NavStrip, navStripHidden } from './components/NavStrip.tsx';
+import { SearchPanel } from './components/SearchPanel.tsx';
+import { closeSearch, getSearch, openSearch } from './search.ts';
 import {
   back,
   beginArray,
@@ -55,6 +58,10 @@ function useKeyboard() {
       else if (ctrl && lower === 'm' && !e.shiftKey) setState({ dialog: { kind: 'bookmarks' } });
       // Alt+M types "µ" on macOS: match the physical key too.
       else if (e.altKey && !e.ctrlKey && !e.metaKey && (lower === 'm' || e.code === 'KeyM')) beginBookmark();
+      // IDA's binary (Alt+B), text (Alt+T) and immediate (Alt+I) search; e.code for macOS, where Alt types symbols.
+      else if (e.altKey && !e.ctrlKey && !e.metaKey && e.code === 'KeyB') openSearch('bytes');
+      else if (e.altKey && !e.ctrlKey && !e.metaKey && e.code === 'KeyT') openSearch('text');
+      else if (e.altKey && !e.ctrlKey && !e.metaKey && e.code === 'KeyI') openSearch('immediate');
       else if ((e.ctrlKey || e.metaKey) && (k === 'p' || k === 'k')) {
         e.preventDefault();
         setState({ dialog: { kind: 'goto' } });
@@ -83,6 +90,7 @@ function useKeyboard() {
       else if (k === 'Escape') {
         if (getUi().find) setUi({ find: null });
         else if (s.xrefs) setState({ xrefs: null });
+        else if (getSearch().open) closeSearch();
         else back();
       } else if (k === ' ') setView(s.loc?.view === 'graph' ? 'linear' : 'graph');
       else if (k === 'Tab') togglePseudo();
@@ -233,7 +241,7 @@ function ThreadsPanel() {
   );
 }
 
-function TopBar() {
+function TopBar({ showNav, onToggleNav }: { showNav?: boolean; onToggleNav?: () => void }) {
   const info = useStore((s) => s.info);
   const loc = useStore((s) => s.loc);
   const options = useStore((s) => s.options);
@@ -267,6 +275,7 @@ function TopBar() {
         <button disabled={!canBack} onClick={back} title="Back (Esc, Alt+←)">←</button>
         <button disabled={!canFwd} onClick={forward} title="Forward (Alt+→)">→</button>
         <button onClick={() => setState({ dialog: { kind: 'goto' } })} title="Go to (G, Ctrl+P)">Go to…</button>
+        <button onClick={() => openSearch()} title="Search bytes (Alt+B), text (Alt+T) or an immediate value (Alt+I)">Search…</button>
       </div>
       <div className="seg">
         {views.map(([v, label, title]) => (
@@ -296,6 +305,11 @@ function TopBar() {
       )}
       <div className="spacer" />
       {discovery?.state === 'running' && <span className="busy">Discovering functions…</span>}
+      {info && onToggleNav && (
+        <button className={`nav-toggle${showNav ? ' active' : ''}`} onClick={onToggleNav} title={`${showNav ? 'Hide' : 'Show'} the navigation band (${NAV_LEGEND})`}>
+          ▤
+        </button>
+      )}
       <ExportMenu />
       <FilePicker>Open…</FilePicker>
     </div>
@@ -336,7 +350,7 @@ function StatusBar() {
       )}
       {showToast && <span className={`toast toast-${toast.kind}`}>{toast.text}</span>}
       <span className="spacer" />
-      <span className="dim keys">G go · ↑↓ move · Enter follow · Ctrl+F find · N rename · Y type/signature · S create struct · X xrefs · Shift+X xrefs from · ; comment · D A O * U data · Ctrl+Z undo · Alt+M mark · Ctrl+M marks · Space graph · Tab pseudo · H hex · B bytes · Esc back</span>
+      <span className="dim keys">G go · ↑↓ move · Enter follow · Ctrl+F find · N rename · Y type/signature · S create struct · X xrefs · Shift+X xrefs from · ; comment · D A O * U data · Alt+B/T/I search · Ctrl+Z undo · Alt+M mark · Ctrl+M marks · Space graph · Tab pseudo · H hex · B bytes · Esc back</span>
     </div>
   );
 }
@@ -417,6 +431,16 @@ export function App() {
   const view = useStore((s) => s.loc?.view);
   const [sideW, setSideW] = useState(280);
   const [pseudoW, setPseudoW] = useState(() => Math.round(window.innerWidth * 0.42));
+  const [showNav, setShowNav] = useState(() => !navStripHidden());
+  const toggleNav = () =>
+    setShowNav((v) => {
+      try {
+        localStorage.setItem('open-reverse.navstrip', v ? 'hidden' : 'shown');
+      } catch {
+        // preference only
+      }
+      return !v;
+    });
   useKeyboard();
   useEffect(() => {
     const onStorageError = (e: Event) => toast((e as CustomEvent<string>).detail, 'error');
@@ -446,7 +470,8 @@ export function App() {
   const splitPseudo = showPseudo && view !== 'hex' && view !== 'types';
   return (
     <div className="app">
-      <TopBar />
+      <TopBar showNav={showNav} onToggleNav={toggleNav} />
+      {info && !openError && showNav && <NavStrip />}
       {openError ? (
         <div className="placeholder error">Could not open binary: {openError}</div>
       ) : !info ? (
@@ -472,6 +497,7 @@ export function App() {
               )}
             </div>
             <XrefsPanel />
+            <SearchPanel />
           </div>
         </div>
       )}
