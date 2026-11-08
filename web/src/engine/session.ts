@@ -264,6 +264,13 @@ export interface CallNode {
 
 type BriefFunction = { id: string; name: string; entry: string } | null;
 
+/** Orders references by source address, those without one last. */
+function compareFrom(a: string | null, b: string | null): number {
+  if (a === null || b === null) return a === b ? 0 : a === null ? 1 : -1;
+  const x = BigInt(a), y = BigInt(b);
+  return x < y ? -1 : x > y ? 1 : 0;
+}
+
 /** Groups established call references by the function at their other end, in first-site order. */
 function callNodes<X extends { kind: string; status: string; from: string | null }>(
   refs: X[],
@@ -1295,20 +1302,34 @@ export class AnalysisSession {
     const index = await this.functions();
     const strings = await this.#loadStrings();
     const names = await this.#loadNames().catch(() => ({ byEntity: new Map<string, string>(), byAddr: new Map<string, string>() }));
-    type Ref = { from: { value: string } | null; to: { value: string } | null; from_function: string | null; to_entity: string | null; kind: string; status: string; target_role: string };
+    type Ref = { id: string; from: { value: string } | null; to: { value: string } | null; from_function: string | null; to_entity: string | null; kind: string; status: string; target_role: string };
     const items: Ref[] = [];
-    let cursor: string | undefined;
-    do {
-      const data = need(
-        await this.binary.getReferences({
-          target: target.id ? { kind: 'entity', id: target.id } : { kind: 'address', address: { image_id: this.binary.image.id, space: 'va', value: canon(target.addr!) } },
-          direction,
-          page: { limit: 1000, ...(cursor ? { cursor } : {}) },
-        } as ToolInput<'xrefs_get'>),
-      ) as { items: Ref[]; page: { next_cursor: string | null } };
-      items.push(...data.items);
-      cursor = data.page.next_cursor ?? undefined;
-    } while (cursor && items.length < 10_000);
+    const seen = new Set<string>();
+    const query = async (on: ToolInput<'xrefs_get'>['target'], dir: typeof direction) => {
+      let cursor: string | undefined;
+      do {
+        const data = need(
+          await this.binary.getReferences({ target: on, direction: dir, page: { limit: 1000, ...(cursor ? { cursor } : {}) } } as ToolInput<'xrefs_get'>),
+        ) as { items: Ref[]; page: { next_cursor: string | null } };
+        for (const r of data.items) {
+          if (seen.has(r.id)) continue;
+          seen.add(r.id);
+          items.push(r);
+        }
+        cursor = data.page.next_cursor ?? undefined;
+      } while (cursor && items.length < 10_000);
+    };
+    const at = (value: string) => ({ kind: 'address', address: { image_id: this.binary.image.id, space: 'va', value: canon(value) } }) as const;
+    await query(target.id ? { kind: 'entity', id: target.id } : at(target.addr!), direction);
+    // An incoming query by entity matches `to_entity` only, and a call to an import stub names the
+    // import there (target_role 'callable_stub'), not the stub function: also ask by its entry.
+    const fn = target.id ? index.byId.get(target.id) : undefined;
+    if (fn && direction !== 'outgoing') {
+      const before = items.length;
+      await query(at(fn.entry), 'incoming');
+      // Keep OpenDecomp's order (by source address) across the two answers.
+      if (items.length > before) items.sort((a, b) => compareFrom(a.from?.value ?? null, b.from?.value ?? null));
+    }
     const brief = (f: FunctionSummary | undefined) => (f ? { id: f.id, name: f.name, entry: f.entry } : null);
     return (
       items
