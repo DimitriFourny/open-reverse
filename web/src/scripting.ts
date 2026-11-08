@@ -459,8 +459,7 @@ function makeApi(run: Run, print: (...a: unknown[]) => void) {
   };
 }
 
-export const HELP = `OpenReverse script API — every call is async: use await. Addresses are hex strings ('0x401000');
-numbers, bigints and names ('main', '_fprintf') are accepted wherever a target is.
+export const HELP = `OpenReverse script API — every call is async: use await. Addresses are hex strings ('0x401000'); numbers, bigints and names ('main', '_fprintf') are accepted wherever a target is.
 
 read
   or.info()                    binary name, format, architecture, entry points
@@ -489,8 +488,7 @@ UI
   or.goto(target)              navigate there
   print(...values)             write to this console (objects are pretty-printed); help() shows this
 
-A script that is one expression shows its value; otherwise \`return\` one. Stop (or Esc) makes the next
-API call throw. Scripts run in the page: a long loop of plain JavaScript without await blocks the UI.`;
+A script that is one expression shows its value; otherwise \`return\` one. Stop (or Esc) makes the next API call throw. Scripts run in the page: a long loop of plain JavaScript without await blocks the UI.`;
 
 export const EXAMPLES: { title: string; code: string }[] = [
   {
