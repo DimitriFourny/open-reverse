@@ -7,6 +7,7 @@ import { getState, navigate, setState, useStore } from '../store.ts';
 import { splitLines, tokenize, type Token } from '../syntax.ts';
 import { FindBar, onCodeMouseDown, useDomFind } from './codeui.tsx';
 import { pseudoKey } from './tokens.ts';
+import { mangledNote } from '../util.ts';
 
 /** Most specific mapping containing a text offset: shortest span, then fewest addresses. */
 function mappingAt(mappings: Mapping[], offset: number, decl: { start: number; end: number } | null): Mapping | null {
@@ -128,7 +129,7 @@ export function PseudoView({ decomp }: { decomp: Decompilation }) {
                       onDoubleClick={fn ? () => void navigate(fn.entry) : undefined}
                       title={
                         fn
-                          ? `${fn.name} @ ${fn.entry} — double-click to open`
+                          ? `${fn.name} @ ${fn.entry}${mangledNote(fn.mangled)} — double-click to open`
                           : variable
                             ? `${variable.parameter ? 'parameter' : 'local'} ${variable.type ? `${variable.type} ` : ''}${variable.name} — N rename · Y retype${/^(?:const )?struct_[0-9a-f]+ \*$/.test(variable.type ?? '') ? ' · S create structure' : ''}`
                             : global

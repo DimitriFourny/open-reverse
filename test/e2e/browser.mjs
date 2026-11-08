@@ -30,6 +30,11 @@ const URL_ = process.env.OPEN_REVERSE_URL ?? 'http://localhost:5199/';
 const STRIPPED = process.env.STRIPPED_BINARY ?? '/bin/ls';
 const SSHPASS = process.env.SSHPASS_BINARY ?? '/tmp/sshpass';
 let failures = 0;
+// A promise a step left behind must fail the run, not crash it before the other steps.
+process.on('unhandledRejection', (e) => {
+  failures++;
+  console.log(`FAIL unhandled rejection: ${String(e?.message ?? e).split('\n')[0]}`);
+});
 {
   const browser = await chromium.launch();
   const ctx = await browser.newContext({ viewport: { width: 1600, height: 950 } });
@@ -461,6 +466,96 @@ let failures = 0;
     if (await page.locator('.lib-type:has-text("struct Msg")').count()) throw new Error('Msg is still declared');
     await page.locator('.seg button', { hasText: 'Linear' }).click();
   });
+  // ------------------------------------------- search, navigation band, demangling
+  /** Runs a search from the keyboard (Alt+B / T / I) and waits for its summary. */
+  const search = async (key, text) => {
+    await page.keyboard.press(key);
+    await page.fill('.search-input', text);
+    await page.keyboard.press('Enter');
+    await page.waitForFunction(() => /\d\.\d\d s$/.test(document.querySelector('.search-summary')?.textContent ?? ''), null, { timeout: 300000 });
+    return page.locator('.search-table tbody tr').evaluateAll((rs) => rs.map((r) => r.textContent));
+  };
+  await step('search bytes, text and immediates; results survive closing the panel', async () => {
+    await page.locator('.brand').click();
+    await page.locator('.recent-item', { hasText: 'elf-x86_64-symbols' }).click();
+    await page.locator('.side-item', { hasText: 'fixture_check' }).click({ timeout: 120000 });
+    await page.locator('.row.insn.cur-fn').first().click();
+    const text = await search('Alt+t', 'LD-LINUX');
+    if (!text.some((r) => r.includes('ld-linux-x86-64.so.2'))) throw new Error(`text: ${text}`);
+    // Every hit is an instruction with a 0 among its operands, located in its function.
+    const imm = await search('Alt+i', '0');
+    const cells = await page.locator('.search-table tbody tr td:last-child').allTextContents();
+    if (!imm.length || !cells.every((c) => /(?<![\w])(0|0h|0x0|#0)(?![\w])/.test(c))) throw new Error(`immediate: ${cells.slice(0, 3)}`);
+    const pat = await search('Alt+b', 'C3');
+    if (!pat.length || !pat.every((r) => r.includes('c3'))) throw new Error(`bytes: ${pat.slice(0, 3)}`);
+    await page.keyboard.press('Escape');
+    await page.waitForSelector('.search-panel', { state: 'detached' });
+    await page.locator('button', { hasText: 'Search…' }).click();
+    if ((await page.locator('.search-table tbody tr').count()) !== pat.length) throw new Error('results lost on reopen');
+    await page.locator('.search-table tbody tr').first().click();
+    await page.waitForFunction(() => /^0x[0-9a-f]+$/.test(document.querySelector('.statusbar span')?.textContent ?? ''));
+    await page.keyboard.press('Escape');
+  });
+  await step('navigation band: hover names the place, click goes there', async () => {
+    const box = await page.locator('.navstrip-canvas').boundingBox();
+    if (!box || box.height > 16) throw new Error(`band box ${JSON.stringify(box)}`);
+    const before = await page.locator('.statusbar span').first().textContent();
+    // The left end is the first mapped section; go to a quarter of the band.
+    await page.mouse.move(box.x + box.width * 0.25, box.y + box.height / 2);
+    const tip = await page.locator('.navstrip-tip').textContent();
+    if (!/^0x[0-9a-f]+ · \S+/.test(tip)) throw new Error(`tip ${tip}`);
+    await page.mouse.click(box.x + box.width * 0.25, box.y + box.height / 2);
+    await page.waitForFunction((b) => document.querySelector('.statusbar span')?.textContent !== b, before, { timeout: 30000 });
+    if (!tip.startsWith((await page.locator('.statusbar span').first().textContent()) + ' ')) throw new Error(`went to ${await page.locator('.statusbar span').first().textContent()}, tip ${tip}`);
+    await page.locator('.nav-toggle').click();
+    await page.waitForSelector('.navstrip', { state: 'detached' });
+    await page.locator('.nav-toggle').click();
+    await page.waitForSelector('.navstrip-canvas');
+    await page.keyboard.press('Escape'); // back
+  });
+  const CXX = fileURLToPath(new URL('../fixtures/cxx-symbols', import.meta.url));
+  await step('C++ names: demangled everywhere, mangled in tooltips, go to by either', async () => {
+    await page.locator('.brand').click();
+    await page.setInputFiles('input[type=file]', CXX);
+    const item = page.locator('.side-item', { hasText: 'geom::area(int, int)' });
+    await item.waitFor({ timeout: 120000 });
+    if (!(await item.getAttribute('title')).includes('mangled: _ZN4geom4areaEii')) throw new Error('no mangled name in the tooltip');
+    if ((await item.getAttribute('class')).includes('renamed')) throw new Error('a demangled name shows as renamed');
+    await page.locator('.side-item', { hasText: /^main/ }).click();
+    const call = page.locator('.pane-pseudo .tok.t-fn', { hasText: 'geom__area_int__int_' }).first();
+    await call.waitFor({ timeout: 180000 });
+    if (!(await call.getAttribute('title')).startsWith('geom::area(int, int) @')) throw new Error(await call.getAttribute('title'));
+    await page.waitForSelector('.row.insn .ref-function:has-text("geom::area(int, int)")');
+    await page.keyboard.press('g');
+    await page.fill('.modal-input', '_ZN4geom4areaEii');
+    await page.keyboard.press('Enter');
+    await page.waitForFunction(() => document.querySelector('.statusbar')?.textContent?.includes('geom::area(int, int)'));
+    const hits = await search('Alt+i', '0x862');
+    if (hits.length !== 1 || !hits[0].includes('helper(std::') || !hits[0].includes('862h')) throw new Error(`immediate: ${hits}`);
+    await page.keyboard.press('Escape');
+    // Renaming starts from the mangled name, and the new name wins.
+    await page.locator('.side-item', { hasText: 'geom::area(int, int)' }).click();
+    await page.locator('.row.insn.cur-fn').first().click();
+    await page.keyboard.press('n');
+    if ((await page.inputValue('.modal-input')) !== '_ZN4geom4areaEii') throw new Error(`rename starts from ${await page.inputValue('.modal-input')}`);
+    await page.fill('.modal-input', 'area');
+    await page.keyboard.press('Enter');
+    await page.waitForSelector('.side-item.renamed:has-text("area")', { timeout: 60000 });
+  });
+  if (existsSync(SSHPASS)) await step(`${SSHPASS}: search the fprintf call sequence, "Conflicting", immediate 0x862`, async () => {
+    await page.locator('.brand').click();
+    await page.setInputFiles('input[type=file]', SSHPASS);
+    await page.waitForSelector('.row.insn', { timeout: 120000 });
+    // ldr x0,[x8]; adrp x1,…; add x1,x1,#0x862; bl _fprintf
+    const seq = await search('Alt+b', '00 01 40 F9 01 00 00 B0 21 88 21 91 ?? ?? ?? 94');
+    if (seq.length !== 4 || !seq.every((r) => r.includes('_parse_options+0x'))) throw new Error(`bytes: ${seq}`);
+    const text = await search('Alt+t', 'Conflicting');
+    if (!text.length || !text.every((r) => /conflicting/i.test(r))) throw new Error(`text: ${text}`);
+    const imm = await search('Alt+i', '0x862');
+    if (imm.filter((r) => r.includes('#0x862')).length < 4) throw new Error(`immediate: ${imm}`);
+    console.log(`      ${seq.length} sequences, ${text.length} strings, ${imm.length} instructions`);
+    await page.keyboard.press('Escape');
+  });
   if (existsSync(SSHPASS)) await step(`${SSHPASS}: rename and retype a global, create a structure from a pointer`, async () => {
     await page.locator('.brand').click();
     await page.setInputFiles('input[type=file]', SSHPASS);
@@ -589,6 +684,8 @@ let failures = 0;
   await step('performance: automatic workers by memory, engine memory shown', async () => {
     await page.waitForSelector('.status-memory:has-text("engine")');
     await page.locator('.brand').click();
+    // The effective count arrives from the engine after the panel shows.
+    await page.waitForFunction(() => /\(\d\)/.test(document.querySelector('.storage-panel select option')?.textContent ?? ''), null, { timeout: 30000 }).catch(() => undefined);
     const auto = await page.locator('.storage-panel select option').first().innerText();
     // One less than the cores (2 to 4), but 1 under 8 GB and at most 2 otherwise.
     const [cores, memory] = await page.evaluate(() => [navigator.hardwareConcurrency || 2, navigator.deviceMemory ?? null]);
@@ -611,9 +708,17 @@ let failures = 0;
   });
   await step('export all pseudocode (zip with one .c per function + types.h)', async () => {
     let sawProgress = false;
-    const watcher = page.waitForSelector('.task-panel:has-text("Decompiling")', { timeout: 120000 }).then(() => (sawProgress = true));
-    const { name, bytes } = await download(page, () => exportItem('export-pseudo'));
-    await watcher.catch(() => undefined);
+    // Settles on its own (never rejects), so a slow export cannot leave an unhandled rejection behind.
+    const watcher = page.waitForSelector('.task-panel:has-text("Decompiling")', { timeout: 120000 }).then(
+      () => (sawProgress = true),
+      () => undefined,
+    );
+    const t0 = Date.now();
+    const { name, bytes } = await download(page, () => exportItem('export-pseudo')).catch(async (e) => {
+      const panel = await page.locator('.task-panel').innerText().catch(() => 'no task panel');
+      throw new Error(`${e.message.split('\n')[0]} after ${Date.now() - t0} ms; task panel: ${JSON.stringify(panel)}`);
+    });
+    await watcher;
     if (!sawProgress) throw new Error('no per-function progress shown');
     const entries = await zipDecode(bytes);
     const paths = entries.map((e) => e.path);

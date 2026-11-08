@@ -9,6 +9,8 @@ export interface TaskProgress {
   total: number | null;
   /** The item in progress (a function name, a file). */
   detail?: string;
+  /** Results found since the previous report (a search streams its hits). */
+  items?: unknown[];
 }
 
 export interface TaskContext {
@@ -17,7 +19,7 @@ export interface TaskContext {
 }
 
 /** Engine methods that receive a TaskContext as their last argument. */
-export const TASK_METHODS = new Set(['exportArchive', 'importArchive', 'exportPseudocode']);
+export const TASK_METHODS = new Set(['exportArchive', 'importArchive', 'exportPseudocode', 'search']);
 
 /** A context for direct (non-RPC) calls and tests. */
 export function noTask(): TaskContext {
