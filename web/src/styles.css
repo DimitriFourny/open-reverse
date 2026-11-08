@@ -1203,3 +1203,87 @@ select:focus {
 .lib-type:hover .lib-actions {
   visibility: visible;
 }
+.t-global {
+  cursor: pointer;
+  color: var(--str);
+}
+.t-global:hover {
+  text-decoration: underline dotted;
+}
+/* Structure editor (Types view) */
+.struct-editor {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+}
+.struct-head {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  font-size: 12px;
+}
+.struct-name {
+  font-family: var(--mono);
+  width: 220px;
+}
+.struct-size {
+  margin-left: auto;
+  font-family: var(--mono);
+}
+.struct-table-wrap {
+  max-height: 260px;
+  overflow: auto;
+  border: 1px solid var(--border);
+}
+.struct-table {
+  border-collapse: collapse;
+  width: 100%;
+  font-family: var(--mono);
+  font-size: 12px;
+}
+.struct-table th {
+  position: sticky;
+  top: 0;
+  background: var(--bg-3);
+  text-align: left;
+  font-family: var(--ui);
+  font-weight: 600;
+  padding: 3px 6px;
+}
+.struct-table td {
+  padding: 1px 6px;
+  border-top: 1px solid #1f242d;
+  white-space: nowrap;
+}
+.struct-table td input {
+  width: 100%;
+  min-width: 80px;
+  font-family: var(--mono);
+  font-size: 12px;
+  padding: 2px 4px;
+}
+.struct-table td input.struct-dims {
+  min-width: 48px;
+  width: 64px;
+}
+.struct-row-actions {
+  width: 1%;
+}
+.struct-row-actions button {
+  padding: 0 3px;
+}
+.struct-padto {
+  width: 70px;
+  font-family: var(--mono);
+}
+.types-actions .flex {
+  flex: 1;
+}
+.struct-source {
+  margin: 0;
+  max-height: 80px;
+  overflow: auto;
+  font-family: var(--mono);
+  font-size: 11px;
+}

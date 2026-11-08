@@ -4,7 +4,7 @@
 import assert from 'node:assert/strict';
 import { describe, test } from 'node:test';
 import { parseCDeclarations } from '../vendor/open-decomp/dist/src/metadata/c-declarations/index.js';
-import { compilePrototype, PrototypeError, splitPrototype, type TypeDefinition } from '../web/src/engine/prototype.ts';
+import { compilePrototype, compileType, PrototypeError, splitPrototype, type TypeDefinition } from '../web/src/engine/prototype.ts';
 
 const parse = (source: string) => parseCDeclarations(source, { abi: 'sysv-amd64' });
 const ids = {
@@ -74,5 +74,33 @@ describe('compilePrototype', () => {
     assert.throws(() => compile('int f(int a, int a)'), /declared twice/);
     assert.throws(() => compile('int f(struct { int x; } *p)'), PrototypeError);
     assert.throws(() => compile('int f(int a b c)'), PrototypeError);
+  });
+});
+
+describe('compileType', () => {
+  const type = (text: string) => compileType(text, parse, ids);
+  const i8 = ids.local({ kind: 'integer', bits: 8, signed: true });
+  test('named types, pointers to them and builtins', () => {
+    assert.equal(type('struct Node *').type, 'ptr:Node');
+    assert.equal(type('struct Node').type, 'named:Node');
+    assert.equal(type('Node*').type, 'ptr:Node');
+    assert.deepEqual(type('struct Node *').namedTypes, ['Node']);
+    const s = type('char *');
+    assert.equal(s.type, ids.local({ kind: 'pointer', to: i8, bits: 64 }));
+    assert.equal(s.declarations.size, 2);
+  });
+  test('arrays keep their array type', () => {
+    const u32 = ids.local({ kind: 'integer', bits: 32, signed: false });
+    assert.equal(type('uint32_t[8]').type, ids.local({ kind: 'array', element: u32, count: 8n }));
+    assert.equal(type('uint32_t [2][3]').type, ids.local({ kind: 'array', element: ids.local({ kind: 'array', element: u32, count: 3n }), count: 2n }));
+  });
+  test('function pointers and a trailing semicolon', () => {
+    assert.equal(type('void (*)(int)').type, ids.local({ kind: 'pointer', to: ids.local({ kind: 'void' }), bits: 64 }));
+    assert.equal(type('int;').type, ids.local({ kind: 'integer', bits: 32, signed: true }));
+  });
+  test('errors', () => {
+    assert.throws(() => type(''), /Empty type/);
+    assert.throws(() => type('void'), /the variable has incomplete type/);
+    assert.throws(() => type('char *name'), PrototypeError);
   });
 });

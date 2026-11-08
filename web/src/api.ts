@@ -105,13 +105,28 @@ export interface Decompilation {
   mappings: Mapping[];
   /** Parameters and locals the text declares, with the value subject a rename annotates. */
   variables: Variable[];
+  /** Globals the C-like text declares (its `extern` lines), with their addresses. */
+  globals: GlobalRef[];
 }
 
 export interface Variable {
   name: string;
   id: string;
   parameter: boolean;
+  /** Its C type as the text declares it; null in python-like. */
+  type: string | null;
 }
+
+export interface GlobalRef {
+  name: string;
+  addr: string;
+  type: string;
+}
+
+/** Offsets and sizes of a structure's fields, laid out by OpenDecomp's C declaration parser. */
+export type StructLayout =
+  | { union: boolean; size: number | null; alignment: number | null; fields: { name: string; offset: number; size: number | null }[] }
+  | { errors: string[] };
 
 /** One declaration of the image's type library (OpenDecomp `types_declare`). */
 export interface LibraryType {
@@ -313,6 +328,13 @@ export const api = {
   setSignature: (bid: string, fid: string, text: string) => call<{ revision: number; confirmed: boolean }>('setSignature', [bid, fid, text]),
   renameVariable: (bid: string, fid: string, valueId: string, name: string, o: DecompileOptions) =>
     call<{ revision: number }>('renameVariable', [bid, fid, valueId, name, o]),
+  setVariableType: (bid: string, fid: string, valueId: string, text: string, o: DecompileOptions) =>
+    call<{ revision: number; shown: string | null }>('setVariableType', [bid, fid, valueId, text, o]),
+  setGlobalType: (bid: string, addr: string, text: string) => call<{ revision: number }>('setGlobalType', [bid, addr, text]),
+  /** The C declaration of a new structure with the members OpenDecomp recovered behind a pointer variable. */
+  structFromVariable: (bid: string, fid: string, variable: string, name: string, o: DecompileOptions) =>
+    call<{ declaration: string; recovered: string }>('structFromVariable', [bid, fid, variable, name, o]),
+  layoutStructure: (bid: string, source: string, name: string, library: string[]) => call<StructLayout>('layoutStructure', [bid, source, name, library]),
   comment: (bid: string, addr: string, text: string) => call<{ comments: Record<string, string> }>('comment', [bid, addr, text]),
   bookmarks: (bid: string) => call<{ bookmarks: Record<string, string> }>('bookmarks', [bid]),
   /** Bookmark an address (empty description is fine); null removes the bookmark. */

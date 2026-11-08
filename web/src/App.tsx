@@ -8,6 +8,7 @@ import {
   back,
   beginBookmark,
   beginComment,
+  beginCreateStruct,
   beginRename,
   beginSignature,
   beginXrefs,
@@ -68,6 +69,7 @@ function useKeyboard() {
       else if (k === 'X' && e.shiftKey) beginXrefs('outgoing');
       else if (k === 'x' || k === 'X') beginXrefs();
       else if (k === 'y' || k === 'Y') void beginSignature();
+      else if (k === 's' || k === 'S') beginCreateStruct();
       else if (k === ';' || k === '/') beginComment();
       else if (k === 'Escape') {
         if (getUi().find) setUi({ find: null });
@@ -320,7 +322,7 @@ function StatusBar() {
       )}
       {showToast && <span className={`toast toast-${toast.kind}`}>{toast.text}</span>}
       <span className="spacer" />
-      <span className="dim keys">G go · ↑↓ move · Enter follow · Ctrl+F find · N rename · Y signature · X xrefs · Shift+X xrefs from · ; comment · Ctrl+Z undo · Alt+M mark · Ctrl+M marks · Space graph · Tab pseudo · H hex · B bytes · Esc back</span>
+      <span className="dim keys">G go · ↑↓ move · Enter follow · Ctrl+F find · N rename · Y type/signature · S create struct · X xrefs · Shift+X xrefs from · ; comment · Ctrl+Z undo · Alt+M mark · Ctrl+M marks · Space graph · Tab pseudo · H hex · B bytes · Esc back</span>
     </div>
   );
 }

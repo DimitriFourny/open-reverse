@@ -4,6 +4,7 @@
 //   npm run test:e2e            # needs `npm i -D playwright && npx playwright install chromium`
 //
 // Env: OPEN_REVERSE_URL (default http://localhost:5199/), STRIPPED_BINARY (default /bin/ls, skipped if absent),
+// SSHPASS_BINARY (an arm64 Mach-O sshpass with an `args` global, default /tmp/sshpass, skipped if absent),
 // PLAYWRIGHT_PATH (a playwright package directory, when it is not installed here), E2E_TMP (scratch directory).
 import { existsSync, mkdirSync, readFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
@@ -25,6 +26,7 @@ mkdirSync(TMP, { recursive: true });
 const FIX = fileURLToPath(new URL('../../vendor/open-decomp/fixtures/bin/', import.meta.url));
 const URL_ = process.env.OPEN_REVERSE_URL ?? 'http://localhost:5199/';
 const STRIPPED = process.env.STRIPPED_BINARY ?? '/bin/ls';
+const SSHPASS = process.env.SSHPASS_BINARY ?? '/tmp/sshpass';
 let failures = 0;
 {
   const browser = await chromium.launch();
@@ -314,6 +316,98 @@ let failures = 0;
     await toast('Undid declaration of count_t');
     await page.waitForSelector('.lib-type:has-text("typedef uint32_t count_t")', { timeout: 120000 });
     await page.locator('.seg button', { hasText: 'Linear' }).click();
+  });
+  await step('retype a parameter from the pseudocode (Y on a variable), undo', async () => {
+    await page.locator('.side-item', { hasText: '_fixture_memory' }).click();
+    await page.waitForSelector('.pline:has-text("fixture_memory(uint64_t* address")', { timeout: 120000 });
+    await page.locator('.pane-pseudo .tok.t-var', { hasText: 'address' }).first().click();
+    await page.keyboard.press('y');
+    if ((await page.inputValue('.modal-input')) !== 'uint64_t *') throw new Error('Y did not open the variable type');
+    await page.fill('.modal-input', 'uint16_t *');
+    await page.keyboard.press('Enter');
+    await page.waitForSelector('.pline:has-text("fixture_memory(uint16_t* address")', { timeout: 120000 });
+    await page.locator('.row.insn').first().click();
+    await page.keyboard.press('Control+z');
+    await page.waitForSelector('.pline:has-text("fixture_memory(uint64_t* address")', { timeout: 120000 });
+  });
+  await step('structure editor: parser offsets, declare, retype a parameter as a pointer to it', async () => {
+    await page.locator('.seg button', { hasText: 'Types' }).click();
+    await page.locator('button', { hasText: 'New structure' }).click();
+    await page.fill('.struct-name', 'Acc');
+    const cell = (row, col) => page.locator('.struct-table tbody tr').nth(row).locator('input').nth(col);
+    await cell(0, 0).fill('uint64_t');
+    await cell(0, 1).fill('total');
+    await page.locator('button', { hasText: 'Add field' }).click();
+    await cell(1, 0).fill('uint8_t');
+    await cell(1, 1).fill('flag');
+    await page.locator('button', { hasText: 'Add field' }).click();
+    await cell(2, 0).fill('char *');
+    await cell(2, 1).fill('label');
+    const offsetOf = (row, want) =>
+      page.waitForFunction(([r, w]) => document.querySelectorAll('.struct-table tbody tr')[r]?.querySelector('td')?.textContent === w, [row, want], { timeout: 60000 });
+    await offsetOf(2, '0x10');
+    await page.waitForSelector('.struct-size:has-text("size 0x18")');
+    await page.locator('.struct-editor button.primary').click();
+    await page.waitForSelector('.lib-type:has-text("struct Acc")', { timeout: 120000 });
+    await page.locator('.lib-type', { hasText: 'struct Acc' }).hover();
+    await page.locator('.lib-type', { hasText: 'struct Acc' }).locator('button', { hasText: 'fields' }).click();
+    if ((await page.locator('.struct-table tbody tr').count()) !== 3) throw new Error('fields did not load the declaration');
+    await page.locator('.struct-table tbody tr').nth(1).locator('button[title="Insert a field above"]').click();
+    await offsetOf(2, '0xc');
+    await page.locator('.struct-editor button', { hasText: 'Cancel' }).click();
+    await page.locator('.seg button', { hasText: 'Linear' }).click();
+    await page.waitForSelector('.pline:has-text("fixture_memory(")', { timeout: 120000 });
+    await page.locator('.pane-pseudo .tok.t-var', { hasText: 'address' }).first().click();
+    await page.keyboard.press('y');
+    await page.fill('.modal-input', 'struct Acc *');
+    await page.keyboard.press('Enter');
+    await page.waitForSelector('.pline:has-text("address->total")', { timeout: 120000 });
+  });
+  await step('create a structure from a pointer local (S), one undo step', async () => {
+    await page.locator('.side-item', { hasText: '_fixture_check' }).click();
+    await page.locator('.pane-pseudo .pline:has-text("struct_47fdf8* address;") .tok.t-var').first().click({ timeout: 120000 });
+    await page.keyboard.press('s');
+    await page.fill('.modal-input', 'Msg');
+    await page.keyboard.press('Enter');
+    // fixture_string()'s char * result: OpenDecomp declares the structure but keeps its own type for the local.
+    await toast('Declared struct Msg');
+    await page.locator('.seg button', { hasText: 'Types' }).click();
+    await page.waitForSelector('.lib-type:has-text("pad_0x0[29]")', { timeout: 120000 });
+    await page.locator('.types-section').first().click();
+    await page.keyboard.press('Control+z');
+    await toast('Undid structure Msg from address');
+    await page.waitForSelector('.lib-type:has-text("struct Acc")', { timeout: 120000 });
+    if (await page.locator('.lib-type:has-text("struct Msg")').count()) throw new Error('Msg is still declared');
+    await page.locator('.seg button', { hasText: 'Linear' }).click();
+  });
+  if (existsSync(SSHPASS)) await step(`${SSHPASS}: rename and retype a global, create a structure from a pointer`, async () => {
+    await page.locator('.brand').click();
+    await page.setInputFiles('input[type=file]', SSHPASS);
+    await page.waitForSelector('.row.insn', { timeout: 120000 });
+    await page.locator('.side-item', { hasText: '_write_pass' }).first().click();
+    await page.waitForSelector('.pline:has-text("extern uint32_t args;")', { timeout: 180000 });
+    await page.locator('.pane-pseudo .tok.t-global', { hasText: 'args' }).first().click();
+    await page.keyboard.press('n');
+    await page.fill('.modal-input', 'g_args');
+    await page.keyboard.press('Enter');
+    await page.waitForSelector('.pline:has-text("extern uint32_t g_args;")', { timeout: 180000 });
+    await page.locator('.seg button', { hasText: 'Types' }).click();
+    await page.fill('.types-input', 'struct Args { uint32_t pwtype; uint32_t pad; char *pwsrc; };');
+    await page.keyboard.press('Control+Enter');
+    await page.waitForSelector('.lib-type:has-text("struct Args")', { timeout: 180000 });
+    await page.locator('.seg button', { hasText: 'Linear' }).click();
+    await page.locator('.pane-pseudo .tok.t-global', { hasText: 'g_args' }).first().click({ timeout: 180000 });
+    await page.keyboard.press('y');
+    await page.fill('.modal-input', 'struct Args');
+    await page.keyboard.press('Enter');
+    await page.waitForSelector('.pline:has-text("g_args.pwtype")', { timeout: 180000 });
+    await page.locator('.side-item', { hasText: '_handleoutput' }).first().click();
+    await page.locator('.pane-pseudo .pline:has-text("struct_533f5f* address;") .tok.t-var').first().click({ timeout: 180000 });
+    await page.keyboard.press('s');
+    await page.fill('.modal-input', 'State');
+    await page.keyboard.press('Enter');
+    await page.waitForSelector('.pline:has-text("struct State* address")', { timeout: 180000 });
+    await page.waitForSelector('.pline:has-text("address->field_0xc")');
   });
   if (existsSync(STRIPPED)) await step(`stripped ${STRIPPED} with background discovery`, async () => {
     await page.locator('.brand').click();

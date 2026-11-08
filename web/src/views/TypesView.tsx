@@ -5,9 +5,17 @@ import { useEffect, useMemo, useState } from 'react';
 import type { LibraryType } from '../api.ts';
 import { declareTypes, loadTypes, removeLibraryType, useStore } from '../store.ts';
 import { splitLines, tokenize } from '../syntax.ts';
+import { declaredMembers } from '../engine/structs.ts';
+import { StructEditor, type StructDraft } from './StructEditor.tsx';
 
 /** The editor's text survives switching views. */
 let savedDraft = '';
+
+/** The structure editor's draft for a library struct or union, or null when its members cannot be edited as a table. */
+function structDraft(t: LibraryType): StructDraft | null {
+  const parsed = t.name ? declaredMembers(t.declaration, t.name) : null;
+  return parsed && { name: t.name!, union: parsed.union, packed: false, members: parsed.members };
+}
 
 /** One-line library declarations (`struct N { int32_t a; T *b; };`) laid out one member per line. */
 function formatDeclaration(decl: string): string {
@@ -44,6 +52,7 @@ export function TypesView() {
   const [draft, setDraftState] = useState(savedDraft);
   const [errors, setErrors] = useState<string[]>([]);
   const [busy, setBusy] = useState(false);
+  const [structure, setStructure] = useState<StructDraft | null>(null);
   useEffect(() => void loadTypes(), []);
   const setDraft = (v: string) => {
     savedDraft = v;
@@ -74,6 +83,11 @@ export function TypesView() {
 
   return (
     <div className="types-view">
+      {structure ? (
+        <div className="types-editor">
+          <StructEditor key={structure.name} initial={structure} onClose={() => setStructure(null)} />
+        </div>
+      ) : (
       <div className="types-editor">
         <div className="types-head">
           <span>Declare C types</span>
@@ -109,9 +123,17 @@ export function TypesView() {
           <button disabled={busy || !draft} onClick={() => (setDraft(''), setErrors([]))}>
             Clear
           </button>
-          <span className="dim">Ctrl+Enter applies · named types can then be used in signatures (Y)</span>
+          <button
+            disabled={busy}
+            onClick={() => setStructure({ name: '', union: false, packed: false, members: [{ type: 'uint32_t', name: 'field_0', dims: '' }] })}
+            title="Edit a new structure as a table of fields"
+          >
+            New structure…
+          </button>
+          <span className="dim">Ctrl+Enter applies · named types can then be used in signatures and types (Y)</span>
         </div>
       </div>
+      )}
       <div className="code-scroll pseudo types-lists">
         <div className="types-section">
           Type library
@@ -136,6 +158,11 @@ export function TypesView() {
               </div>
               <div className="lib-actions">
                 {t.status !== 'asserted' && <span className="dim">{t.status}</span>}
+                {structDraft(t) && (
+                  <button className="link" onClick={() => setStructure(structDraft(t))} title="Edit its fields in the structure editor">
+                    fields
+                  </button>
+                )}
                 <button className="link" onClick={() => edit(t)} title="Load into the editor">
                   edit
                 </button>
