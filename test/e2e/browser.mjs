@@ -5,8 +5,9 @@
 //
 // Env: OPEN_REVERSE_URL (default http://localhost:5199/), STRIPPED_BINARY (default /bin/ls, skipped if absent),
 // SSHPASS_BINARY (an arm64 Mach-O sshpass with an `args` global, default /tmp/sshpass, skipped if absent),
-// PLAYWRIGHT_PATH (a playwright package directory, when it is not installed here), E2E_TMP (scratch directory).
-import { existsSync, mkdirSync, readFileSync } from 'node:fs';
+// PLAYWRIGHT_PATH (a playwright package directory, when it is not installed here), E2E_TMP (scratch directory),
+// E2E_LOG (a file to write a timestamped trace to: console messages, workers, toasts, task panel, failures in full).
+import { appendFileSync, existsSync, mkdirSync, readFileSync } from 'node:fs';
 import { createServer } from 'node:http';
 import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
@@ -39,21 +40,54 @@ process.on('unhandledRejection', (e) => {
 {
   const browser = await chromium.launch();
   const ctx = await browser.newContext({ viewport: { width: 1600, height: 950 } });
+  // With E2E_LOG, the page reports toasts and task-panel changes to the trace.
+  if (process.env.E2E_LOG)
+    await ctx.addInitScript(() => {
+      let panel = null;
+      new MutationObserver(() => {
+        for (const t of document.querySelectorAll('.toast:not([data-traced])')) {
+          t.setAttribute('data-traced', '');
+          console.debug(`[e2e] toast: ${t.textContent}`);
+        }
+        const now = document.querySelector('.task-panel .task-phase')?.textContent ?? null;
+        if (now !== panel) console.debug(`[e2e] task panel: ${(panel = now)}`);
+      }).observe(document, { subtree: true, childList: true, characterData: true });
+    });
   let page = await ctx.newPage();
   const errors = [];
+  const t0 = Date.now();
+  const trace = (text) => process.env.E2E_LOG && appendFileSync(process.env.E2E_LOG, `[${((Date.now() - t0) / 1000).toFixed(1)}] ${text}\n`);
+  /** Live Web Workers per page: the engine, plus each open binary's request-worker helpers. */
+  const workers = new Map();
   const watch = (p) => {
-    p.on('pageerror', (e) => errors.push(`pageerror: ${e}`));
-    p.on('console', (m) => m.type() === 'error' && errors.push(m.text().slice(0, 300)));
+    p.on('pageerror', (e) => (errors.push(`pageerror: ${e}`), trace(`pageerror: ${e}`)));
+    p.on('console', (m) => {
+      if (m.type() === 'error') errors.push(m.text().slice(0, 300));
+      trace(`console.${m.type()}: ${m.text().slice(0, 600)}`);
+    });
+    p.on('crash', () => (errors.push('page crashed'), trace('PAGE CRASHED')));
+    workers.set(p, 0);
+    p.on('worker', (w) => {
+      workers.set(p, workers.get(p) + 1);
+      trace(`worker started ${w.url()}`);
+      w.on('close', () => (workers.set(p, workers.get(p) - 1), trace(`worker closed ${w.url()}`)));
+    });
+    p.on('download', (d) => trace(`download ${d.suggestedFilename()}`));
   };
   watch(page);
   const step = async (name, fn) => {
     const t = Date.now();
+    trace(`step ${name}`);
     try {
       await fn();
       console.log(`ok   ${name} (${Date.now() - t} ms)`);
     } catch (e) {
       failures++;
-      console.log(`FAIL ${name}: ${e.message.split('\n')[0]}`);
+      // Playwright's call log says what an action waited for (the element, its state).
+      const [first, ...log] = e.message.split('\n');
+      const waited = log.filter((l) => /^\s+- /.test(l)).slice(-3).map((l) => l.trim().slice(2));
+      console.log(`FAIL ${name}: ${first}${waited.length ? ` [${waited.join('; ')}]` : ''}`);
+      trace(`FAIL ${name}: ${e.message}`);
     }
   };
 
@@ -779,6 +813,11 @@ return (await or.xrefsTo(s.addr)).length`);
 
   await step('reopen ELF from the recent list', async () => {
     await page.locator('.brand').click();
+    // Leaving a binary closes its engine session: only the engine worker is left.
+    for (let i = 0; workers.get(page) > 1; i++) {
+      if (i > 100) throw new Error(`${workers.get(page)} workers still running at home`);
+      await page.waitForTimeout(100);
+    }
     await page.locator('.recent-item', { hasText: 'elf-x86_64-symbols' }).click();
     await page.waitForSelector('.side-item:has-text("my_max")', { timeout: 120000 });
   });
