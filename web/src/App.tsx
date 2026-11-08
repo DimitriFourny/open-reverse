@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { ExportMenu, ImportArchiveButton, importArchive, isProjectArchive, RecentActions, StoragePanel, TaskDialog, UsageCell } from './components/DataTools.tsx';
 import { api } from './api.ts';
+import type { EngineMemory } from './engine/memory.ts';
 import { Dialogs } from './components/Dialogs.tsx';
 import { Sidebar } from './components/Sidebar.tsx';
 import { XrefsPanel } from './components/XrefsPanel.tsx';
@@ -192,13 +193,62 @@ export function savedThreads(): number {
   }
 }
 
+/** What the engine holds in memory, polled every `ms` (null until known, or when it cannot be read). */
+function useEngineMemory(ms: number): EngineMemory | null {
+  const [memory, setMemory] = useState<EngineMemory | null>(null);
+  useEffect(() => {
+    let live = true;
+    const poll = () => void api.engineMemory().then((m) => live && setMemory(m), () => undefined);
+    poll();
+    const t = setInterval(poll, ms);
+    return () => {
+      live = false;
+      clearInterval(t);
+    };
+  }, [ms]);
+  return memory;
+}
+
+/** Bytes the whole tab uses (every worker included): only in cross-origin isolated pages (Chrome). */
+function useTabMemory(ms: number): number | null {
+  const [bytes, setBytes] = useState<number | null>(null);
+  useEffect(() => {
+    const measure = (performance as Performance & { measureUserAgentSpecificMemory?: () => Promise<{ bytes: number }> }).measureUserAgentSpecificMemory;
+    if (!window.crossOriginIsolated || !measure) return;
+    let live = true;
+    const poll = () => void measure.call(performance).then((r) => live && setBytes(r.bytes), () => undefined);
+    poll();
+    const t = setInterval(poll, ms);
+    return () => {
+      live = false;
+      clearInterval(t);
+    };
+  }, [ms]);
+  return bytes;
+}
+
+const engineTotal = (m: EngineMemory) => m.sqlite + m.files + (m.js ?? 0);
+
+function memoryTitle(m: EngineMemory, tab: number | null): string {
+  return [
+    `Engine worker: ${fmtSize(engineTotal(m))}`,
+    `  SQLite heap ${fmtSize(m.sqlite)} (project databases; it never shrinks)`,
+    `  in-memory files ${fmtSize(m.files)} (binaries, artifacts)`,
+    `  JavaScript heap ${m.js === null ? 'not reported by this browser' : fmtSize(m.js)}`,
+    tab === null ? 'Decompile workers and the decompiler WASM heaps are not included.' : `Whole tab (all workers): ${fmtSize(tab)}`,
+  ].join('\n');
+}
+
 function ThreadsPanel() {
   const [choice, setChoice] = useState(savedThreads);
   const [effective, setEffective] = useState<number | null>(null);
+  const memory = useEngineMemory(5000);
+  const tab = useTabMemory(10000);
   useEffect(() => {
     void api.setThreads(choice).then((r) => setEffective(r.threads), () => undefined);
   }, [choice]);
   const cores = navigator.hardwareConcurrency || 2;
+  const deviceGiB = (navigator as Navigator & { deviceMemory?: number }).deviceMemory;
   return (
     <div className="storage-panel">
       <div className="storage-line">
@@ -223,11 +273,24 @@ function ThreadsPanel() {
             </option>
           ))}
         </select>
-        <span className="dim">{cores} logical cores</span>
+        <span className="dim">
+          {cores} logical cores · {deviceGiB ? `${deviceGiB >= 8 ? '8+' : deviceGiB} GB memory` : 'memory not reported'}
+        </span>
       </div>
+      {memory && (
+        <div className="storage-line engine-memory" title={memoryTitle(memory, tab)}>
+          <span>Engine memory</span>
+          <span className="dim">
+            {fmtSize(engineTotal(memory))} (SQLite {fmtSize(memory.sqlite)}, files {fmtSize(memory.files)}
+            {memory.js !== null ? `, JS ${fmtSize(memory.js)}` : ''}){tab !== null ? ` · whole tab ${fmtSize(tab)}` : ''}
+          </span>
+        </div>
+      )}
       <p className="storage-hint dim">
         Decompiles run in parallel Web Workers, so navigation stays responsive while a large function decompiles and exports use every worker.
-        Each worker keeps its own copy of the project in memory. Applies when a binary is next opened.
+        Each worker keeps its own copy of the project database and its own decompiler heaps, so a large binary can take a few GB per worker.
+        Automatic uses one less than the cores (2 to 4), but only 1 (the engine thread) when the browser reports less than 8 GB of memory, and at most
+        2 otherwise (browsers report at most 8 GB, or nothing at all); pick more by hand on a machine with plenty of memory. Applies when a binary is next opened.
       </p>
     </div>
   );
@@ -310,6 +373,7 @@ function StatusBar() {
   const open = useStore((s) => !!s.info);
   const threads = useStore((s) => s.info?.threads ?? 1);
   const toast = useStore((s) => s.toast);
+  const memory = useEngineMemory(10000);
   const [, tick] = useState(0);
   useEffect(() => {
     if (!toast) return;
@@ -332,6 +396,11 @@ function StatusBar() {
         <span className="dim">
           {count} functions · rev {revision}
           {threads > 1 ? ` · ${threads} workers` : ''}
+        </span>
+      )}
+      {open && memory && (
+        <span className="dim status-memory" title={memoryTitle(memory, null)}>
+          engine {fmtSize(engineTotal(memory))}
         </span>
       )}
       {showToast && <span className={`toast toast-${toast.kind}`}>{toast.text}</span>}

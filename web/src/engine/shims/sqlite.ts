@@ -17,6 +17,11 @@ export async function initSqlite(): Promise<void> {
   sqlite3 = await init();
 }
 
+/** Size of the SQLite WASM memory (0 before initialization). */
+export function sqliteHeapBytes(): number {
+  return sqlite3 ? sqlite3.wasm.heap8u().byteLength : 0;
+}
+
 function api(): Sqlite3Static {
   if (!sqlite3) throw new Error('SQLite WASM is not initialized');
   return sqlite3;

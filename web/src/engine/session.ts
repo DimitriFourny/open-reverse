@@ -6,6 +6,10 @@ import type { QueryService } from '@od/service/queries/index.js';
 import { entityIdentity, typeLibraryIdentity, userTypeIdentity } from '@od/core/identity.js';
 import { encodeTypeDefinition } from '@od/core/serialization.js';
 import { parseCDeclarations } from '@od/metadata/c-declarations/index.js';
+import { MachOLoader } from '@od/loaders/macho/index.js';
+import { recoverRuntimeMetadata } from '@od/metadata/runtime/index.js';
+import { ImmutableBytes } from '@od/core/addresses.js';
+import { createOperationContext } from '@od/core/operation.js';
 import { canon, operandConstants } from './hex.ts';
 import {
   buildLayout,
@@ -27,6 +31,8 @@ import {
 import { compilePrototype, compileType, PrototypeError, type TypeDefinition, type TypeIds } from './prototype.ts';
 import { declaredMembers, normalizeType, recoveredDeclaration, structLayout } from './structs.ts';
 import { createHash } from './shims/crypto.ts';
+import { objcComment, objcItems, objcLabel, objcMessage, objcRelabels, type ObjCItem } from './objc.ts';
+import { vfs } from './vfs.ts';
 import type { BinaryRecord, Workspace } from './workspace.ts';
 
 /** The largest budget OpenDecomp accepts: discovery of a real binary needs it. */
@@ -305,6 +311,8 @@ export class AnalysisSession {
   #names: { revision: number; value: Promise<Names> } | null = null;
   /** Type library IDs by C name (and `Name*` for its pointer type), including typedef aliases. */
   readonly #typeNames = new Map<string, string>();
+  /** Objective-C runtime items by address (empty without Objective-C metadata). The image never changes. */
+  #objc: Promise<Map<string, ObjCItem>> | null = null;
 
   private constructor(workspace: Workspace, record: BinaryRecord, binary: BinarySession) {
     this.#workspace = workspace;
@@ -575,6 +583,35 @@ export class AnalysisSession {
     return value;
   }
 
+  /**
+   * OpenDecomp's static Objective-C runtime metadata (selector and class references,
+   * selector stubs, CFString objects, classes). Its query tools do not expose these records
+   * (they only name methods), so the image is loaded here once more and read with the same
+   * recovery OpenDecomp runs on import.
+   */
+  #loadObjC(): Promise<Map<string, ObjCItem>> {
+    this.#objc ??= (async () => {
+      if (this.binary.image.target.format !== 'macho') return new Map<string, ObjCItem>();
+      const sections = await this.#layoutSections();
+      if (!sections.some((s) => s.name.startsWith('__objc_') || s.name === '__cfstring')) return new Map<string, ObjCItem>();
+      const context = createOperationContext();
+      const image = new MachOLoader().load(
+        {
+          image_id: this.binary.image.id,
+          sha256: this.record.sha256,
+          bytes: new ImmutableBytes(vfs.read(this.#workspace.binaryPath(this.record))),
+          slice_id: (this.binary.image as { selected_slice_id?: string | null }).selected_slice_id ?? null,
+        },
+        context,
+      );
+      return objcItems(recoverRuntimeMetadata({ image, revision: 0 }, context).records);
+    })().catch((error: unknown) => {
+      console.warn('Objective-C metadata unavailable:', error instanceof Error ? error.message : String(error));
+      return new Map<string, ObjCItem>();
+    });
+    return this.#objc;
+  }
+
   /** OpenDecomp's established references from the instructions of a function, by instruction address. */
   async #outgoing(functionId: string) {
     type Ref = { from: { value: string } | null; to: { value: string } | null; to_entity: string | null; kind: string; status: string; target_role: string };
@@ -749,8 +786,14 @@ export class AnalysisSession {
     ]);
     // Globals renamed here: their name is an annotation on the data entity, not on the symbol.
     const globals = (await this.#workspace.data(this.record.id)).names;
+    const objc = await this.#loadObjC();
     const bytes = await this.#instructionBytes(raw.map((i) => ({ addr: BigInt(i.address.value), size: i.size })));
 
+    const dataName = (a: string) => {
+      const item = objc.get(a);
+      const name = names.symbols.get(a);
+      return item && objcRelabels(item, name) ? objcLabel(item) : name;
+    };
     const idToAddr = new Map<string, string>();
     const insns: Instruction[] = [];
     for (const i of raw) {
@@ -767,7 +810,7 @@ export class AnalysisSession {
         else if (targets.includes(a)) refs.push({ text: c.text, addr: a, kind: 'code', label: '' });
         // A memory operand naming a mapped address, or an immediate that looks like a pointer.
         else if ((c.inMemory || c.value >= 0x10000n) && (await this.#isMapped(c.value)))
-          refs.push({ text: c.text, addr: a, kind: 'data', label: globals[a] ?? names.symbols.get(a) ?? '' });
+          refs.push({ text: c.text, addr: a, kind: 'data', label: globals[a] ?? dataName(a) ?? '' });
       }
       const resolved: Instruction['resolved'] = [];
       for (const r of outgoing.get(addr) ?? []) {
@@ -778,7 +821,7 @@ export class AnalysisSession {
         const f = (to ? index.byEntry.get(to) : undefined) ?? (r.to_entity ? index.byId.get(r.to_entity) : undefined);
         const s = to ? strings.get(to) : undefined;
         const name = (to ? globals[to] : undefined) ?? (r.to_entity ? names.byEntity.get(r.to_entity) : undefined) ?? (to ? names.byAddr.get(to) : undefined);
-        const item: Instruction['resolved'][number] | null = f
+        let item: Instruction['resolved'][number] | null = f
           ? { addr: f.entry, kind: 'function', label: f.name, access: r.kind }
           : s && to
             ? { addr: to, kind: 'string', label: s.text, access: r.kind }
@@ -787,6 +830,9 @@ export class AnalysisSession {
               : to
                 ? { addr: to, kind: r.target_role === 'code' ? 'code' : 'data', label: name ?? '', access: r.kind }
                 : null;
+        // A selector or class reference, a CFString: what it means, not the import its slot binds.
+        const oc = to && !f ? objc.get(to) : undefined;
+        if (oc) item = { addr: to!, kind: 'data', label: globals[to!] ?? objcComment(oc), access: r.kind };
         if (item && !resolved.some((x) => x.addr === item.addr && x.label === item.label)) resolved.push(item);
       }
       insns.push({
@@ -801,6 +847,7 @@ export class AnalysisSession {
         resolved,
       });
     }
+    if (objc.size) this.#objcMessages(fn, insns, objc, index.byEntry, names);
     const blocks: Block[] = blocksRaw.map((b) => ({
       id: b.id,
       start: canon(b.ranges[0]?.start.value ?? '0x0'),
@@ -808,6 +855,22 @@ export class AnalysisSession {
       edges: b.edges.map((e) => ({ to: e.to, target: e.target ? canon(e.target.value) : null, kind: e.kind, conditional: e.conditional })),
     }));
     return { function: fn, instructions: insns, blocks, gaps };
+  }
+
+  /** Puts the message an `objc_msgSend` (or selector stub) call sends first in its comment. */
+  #objcMessages(fn: FunctionSummary, insns: Instruction[], objc: Map<string, ObjCItem>, byEntry: Map<string, FunctionSummary>, names: Names): void {
+    // A method's x0 on entry is self (the instructions start at the entry when it comes first).
+    const method = /^[-+]\[/.test(fn.originalName ?? fn.name) && insns[0]?.addr === fn.entry;
+    const targets = new Set(insns.flatMap((i) => (i.flow.kind === 'call' ? [] : i.flow.targets)));
+    const itemOf = (insn: Instruction) => {
+      for (const r of insn.resolved) if (r.kind === 'data' && objc.has(r.addr)) return { addr: r.addr, ...objc.get(r.addr)! };
+      return null;
+    };
+    const calleeName = (a: string) => byEntry.get(a)?.originalName ?? byEntry.get(a)?.name ?? names.byAddr.get(a) ?? null;
+    insns.forEach((insn, i) => {
+      const message = objcMessage(insns, i, calleeName, (a) => objc.get(a) ?? null, itemOf, targets, method);
+      if (message) insn.resolved.unshift({ addr: message.addr, kind: 'data', label: message.text, access: 'message' });
+    });
   }
 
   /** Each instruction's bytes as hex, read through the page cache. */
@@ -892,13 +955,14 @@ export class AnalysisSession {
     const key = `${this.binary.revision}/${this.#dataVersion}`;
     if (this.#linear?.key === key) return this.#linear.value;
     const value = (async () => {
-      const [index, strings, names, relocations, sections, data] = await Promise.all([
+      const [index, strings, names, relocations, sections, data, objc] = await Promise.all([
         this.functions(),
         this.#loadStrings(),
         this.#loadNames().catch((): Names => ({ byEntity: new Map(), byAddr: new Map(), symbols: new Map(), slots: new Map() })),
         this.#loadRelocations(),
         this.#layoutSections(),
         this.#workspace.data(this.record.id),
+        this.#loadObjC(),
       ]);
       const pointerSize = BigInt(this.binary.image.target.address_bits / 8);
       // Priority on overlaps: function entry ranges, other function ranges, user data, pointers, strings.
@@ -926,6 +990,7 @@ export class AnalysisSession {
         candidates.push({ kind: 'string', start, end: start + BigInt(str.length + nul), text: str.text, encoding: str.encoding, terminated: str.terminated });
       }
       const labels = new Map(names.symbols);
+      for (const [addr, item] of objc) if (item.kind !== 'stub' && objcRelabels(item, labels.get(addr))) labels.set(addr, objcLabel(item));
       for (const f of index.list) labels.delete(f.entry);
       for (const [addr, name] of Object.entries(data.names)) labels.set(addr, name);
       const layout = buildLayout(sections, candidates, labels);
