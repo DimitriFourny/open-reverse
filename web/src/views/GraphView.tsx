@@ -6,7 +6,7 @@ import type { Instruction, Listing } from '../api.ts';
 import { setCursor, useStore } from '../store.ts';
 import { padAddr } from '../util.ts';
 import { FindBar, onCodeMouseDown, useCodeKeys, useDomFind } from './codeui.tsx';
-import { Mnemonic, Operands, autoComment, displayOperands, followFrom, labelFor } from './disasm.tsx';
+import { AutoComment, Mnemonic, Operands, autoComment, displayOperands, followFrom, labelFor } from './disasm.tsx';
 
 const LINE_H = 18;
 const PAD_X = 10;
@@ -370,7 +370,7 @@ const GNode = memo(function GNode({
                 {' ; '}
                 {user && <span className="user-comment">{user}</span>}
                 {user && auto ? '  ' : ''}
-                {auto}
+                {auto && <AutoComment insn={insn} />}
               </span>
             )}
           </div>

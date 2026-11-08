@@ -4,7 +4,7 @@ import type { Instruction, Listing } from '../api.ts';
 import { setCursor, useStore } from '../store.ts';
 import { padAddr } from '../util.ts';
 import { FindBar, onCodeMouseDown, useCodeKeys, useFindPaint, useFindQuery } from './codeui.tsx';
-import { Mnemonic, Operands, autoComment, branchTargets, displayOperands, followFrom, labelFor } from './disasm.tsx';
+import { AutoComment, Mnemonic, Operands, autoComment, branchTargets, displayOperands, followFrom, labelFor } from './disasm.tsx';
 
 type Row =
   | { kind: 'header' }
@@ -281,7 +281,7 @@ export function LinearView({ listing }: { listing: Listing }) {
                     {' ; '}
                     {user && <span className="user-comment">{user}</span>}
                     {user && auto ? '  ' : ''}
-                    {auto}
+                    {auto && <AutoComment insn={insn} />}
                   </span>
                 )}
               </div>

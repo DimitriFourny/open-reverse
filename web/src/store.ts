@@ -535,9 +535,13 @@ export function beginRename(): void {
   setState({ dialog: { kind: 'rename', target: { id: fn.id }, current: fn.name, what: `function at ${fn.entry}` } });
 }
 
-/** Xrefs to the current selection, else to the current function (X). */
+/**
+ * Xrefs (X) to the selected operand or comment target; else, on a disassembly line,
+ * to what that line references (a call target, a string, a resolved ADRP pair...) or,
+ * referencing nothing, to the line itself (jumps to it); else to the current function.
+ */
 export function beginXrefs(): void {
-  const { selection, byId, byEntry, loc } = state;
+  const { selection, byId, byEntry, loc, listing } = state;
   if (selection?.kind === 'function') {
     const f = byId.get(selection.fnId);
     if (f) return void showXrefs({ id: f.id }, `Xrefs to ${f.name}`);
@@ -546,6 +550,26 @@ export function beginXrefs(): void {
     const f = byEntry.get(selection.addr);
     if (f) return void showXrefs({ id: f.id }, `Xrefs to ${f.name}`);
     return void showXrefs({ addr: selection.addr }, `Xrefs to ${selection.addr}`);
+  }
+  const insns = listing.data?.instructions ?? [];
+  const insn = loc && (loc.view === 'linear' || loc.view === 'graph') ? insns.find((i) => i.addr === loc.addr) : undefined;
+  if (insn && !byEntry.has(insn.addr)) {
+    const local = new Set(insns.map((i) => i.addr));
+    // An ADRP operand is a 4 KiB page base, not what the code refers to (that is resolved with its ADD/LDR).
+    const page = /^adrp?$/i.test(insn.mnemonic);
+    const ref = page ? undefined : insn.refs.find((r) => r.kind !== 'code' && !(local.has(r.addr) && r.kind !== 'function'));
+    const resolved = insn.resolved?.find((t) => t.addr);
+    const target = ref
+      ? { addr: ref.addr, kind: ref.kind, label: ref.kind === 'string' ? JSON.stringify(ref.label.slice(0, 40)) : ref.label }
+      : resolved
+        ? { addr: resolved.addr, kind: resolved.kind, label: resolved.kind === 'string' ? JSON.stringify(resolved.label.slice(0, 40)) : resolved.label }
+        : null;
+    if (target) {
+      const f = target.kind === 'function' ? byEntry.get(target.addr) : undefined;
+      if (f) return void showXrefs({ id: f.id }, `Xrefs to ${f.name}`);
+      return void showXrefs({ addr: target.addr }, `Xrefs to ${target.label || target.addr}`);
+    }
+    return void showXrefs({ addr: insn.addr }, `Xrefs to ${insn.addr}`);
   }
   const f = loc?.fnId ? byId.get(loc.fnId) : undefined;
   if (f) void showXrefs({ id: f.id }, `Xrefs to ${f.name}`);

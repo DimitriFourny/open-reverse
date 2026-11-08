@@ -61,6 +61,17 @@ export interface Instruction {
   valid: boolean;
   flow: { kind: string; targets: string[]; conditional: boolean };
   refs: OperandRef[];
+  /** Addresses computed beyond the operand text (ADRP+ADD/LDR pairs, GOT/import slots, RIP-relative loads). */
+  resolved?: ResolvedTarget[];
+}
+
+export interface ResolvedTarget {
+  /** Empty for an import known only by name (a call through a stub). */
+  addr: string;
+  kind: 'function' | 'string' | 'import' | 'data' | 'code';
+  label: string;
+  /** How the instruction uses it: address, read, write, call, branch... */
+  access: string;
 }
 
 export interface Block {

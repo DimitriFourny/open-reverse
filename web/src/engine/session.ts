@@ -64,6 +64,9 @@ export interface Instruction {
   valid: boolean;
   flow: { kind: string; targets: string[]; conditional: boolean };
   refs: { text: string; addr: string; kind: 'function' | 'string' | 'code' | 'data'; label: string }[];
+  /** Addresses OpenDecomp computed for this instruction beyond its operand text (ARM64 ADRP+ADD/LDR,
+   * x86 RIP-relative loads, GOT/import slots...), with what they name. */
+  resolved: { addr: string; kind: 'function' | 'string' | 'import' | 'data' | 'code'; label: string; access: string }[];
 }
 
 export interface Block {
@@ -187,6 +190,8 @@ export class AnalysisSession {
   #functions: { revision: number; list: FunctionSummary[]; byId: Map<string, FunctionSummary>; byEntry: Map<string, FunctionSummary>; indexState: string } | null = null;
   #strings: Promise<Map<string, { text: string; encoding: string; id: string }>> | null = null;
   #mappings: Promise<Mapping[]> | null = null;
+  /** Names for reference targets at one revision: imports by entity id and by slot, symbols by address. */
+  #names: { revision: number; value: Promise<{ byEntity: Map<string, string>; byAddr: Map<string, string> }> } | null = null;
   /** Type library IDs by C name (and `Name*` for its pointer type), including typedef aliases. */
   readonly #typeNames = new Map<string, string>();
 
@@ -413,6 +418,60 @@ export class AnalysisSession {
     return this.#strings;
   }
 
+  #loadNames() {
+    const revision = this.binary.revision;
+    if (this.#names?.revision === revision) return this.#names.value;
+    const value = (async () => {
+      type Named = { id: string; display_name: string | null; original_name: string | null; address?: { value: string } | null; slot?: { value: string } | null };
+      const byEntity = new Map<string, string>();
+      const byAddr = new Map<string, string>();
+      let cursor: string | undefined;
+      do {
+        const data = need(await this.binary.findSymbols({ page: { limit: 1000, ...(cursor ? { cursor } : {}) } }));
+        for (const item of data.items as unknown as { kind: string; symbol?: Named; import?: Named }[]) {
+          const e = item.import ?? item.symbol;
+          const name = e?.display_name ?? e?.original_name;
+          if (!e || !name) continue;
+          byEntity.set(e.id, name);
+          const at = item.import ? e.slot?.value : e.address?.value;
+          if (at && !byAddr.has(canon(at))) byAddr.set(canon(at), name);
+        }
+        cursor = data.page.next_cursor ?? undefined;
+      } while (cursor && byEntity.size < MAX_LIST_ITEMS);
+      return { byEntity, byAddr };
+    })();
+    this.#names = { revision, value };
+    value.catch(() => {
+      if (this.#names?.value === value) this.#names = null;
+    });
+    return value;
+  }
+
+  /** OpenDecomp's established references from the instructions of a function, by instruction address. */
+  async #outgoing(functionId: string) {
+    type Ref = { from: { value: string } | null; to: { value: string } | null; to_entity: string | null; kind: string; status: string; target_role: string };
+    const out = new Map<string, Ref[]>();
+    let cursor: string | undefined;
+    let n = 0;
+    do {
+      const data = need(
+        await this.binary.getReferences({
+          target: { kind: 'entity', id: functionId },
+          direction: 'outgoing',
+          page: { limit: 1000, ...(cursor ? { cursor } : {}) },
+        } as ToolInput<'xrefs_get'>),
+      ) as { items: Ref[]; page: { next_cursor: string | null } };
+      for (const r of data.items) {
+        if (!r.from || r.status !== 'established' || (!r.to && !r.to_entity)) continue;
+        const at = canon(r.from.value);
+        out.set(at, [...(out.get(at) ?? []), r]);
+      }
+      n += data.items.length;
+      cursor = data.page.next_cursor ?? undefined;
+    } while (cursor && n < 20_000);
+    return out;
+  }
+
   async strings() {
     const map = await this.#loadStrings();
     return [...map.entries()].map(([addr, s]) => ({ addr, ...s }));
@@ -524,6 +583,11 @@ export class AnalysisSession {
     const index = await this.functions();
     const strings = await this.#loadStrings();
     const comments = await this.#workspace.comments(this.record.id);
+    // Resolved targets are a nicety: a listing without them is still a listing.
+    const [outgoing, names] = await Promise.all([
+      this.#outgoing(functionId).catch(() => new Map<string, never[]>()),
+      this.#loadNames().catch(() => ({ byEntity: new Map<string, string>(), byAddr: new Map<string, string>() })),
+    ]);
     const bytes = await this.#instructionBytes(raw.map((i) => ({ addr: BigInt(i.address.value), size: i.size })));
 
     const idToAddr = new Map<string, string>();
@@ -544,6 +608,26 @@ export class AnalysisSession {
         else if ((c.inMemory || c.value >= 0x10000n) && (await this.#isMapped(c.value)))
           refs.push({ text: c.text, addr: a, kind: 'data', label: '' });
       }
+      const resolved: Instruction['resolved'] = [];
+      for (const r of outgoing.get(addr) ?? []) {
+        const to = r.to ? canon(r.to.value) : null;
+        // Already shown: an operand constant or a branch/call target.
+        if (to && (refs.some((x) => x.addr === to) || targets.includes(to))) continue;
+        if (!to && r.kind === 'branch') continue;
+        const f = (to ? index.byEntry.get(to) : undefined) ?? (r.to_entity ? index.byId.get(r.to_entity) : undefined);
+        const s = to ? strings.get(to) : undefined;
+        const name = (r.to_entity ? names.byEntity.get(r.to_entity) : undefined) ?? (to ? names.byAddr.get(to) : undefined);
+        const item: Instruction['resolved'][number] | null = f
+          ? { addr: f.entry, kind: 'function', label: f.name, access: r.kind }
+          : s && to
+            ? { addr: to, kind: 'string', label: s.text, access: r.kind }
+            : name && (r.target_role === 'import_slot' || r.target_role === 'callable_stub' || !to)
+              ? { addr: to ?? '', kind: 'import', label: name, access: r.kind }
+              : to
+                ? { addr: to, kind: r.target_role === 'code' ? 'code' : 'data', label: name ?? '', access: r.kind }
+                : null;
+        if (item && !resolved.some((x) => x.addr === item.addr && x.label === item.label)) resolved.push(item);
+      }
       insns.push({
         addr,
         size: i.size,
@@ -553,6 +637,7 @@ export class AnalysisSession {
         valid: i.validity === 'valid',
         flow: { kind: i.flow.kind, targets, conditional: i.flow.kind === 'branch' && !!(i.flow.next ?? i.flow.fallthrough) },
         refs,
+        resolved,
       });
     }
     const blocks: Block[] = blocksRaw.map((b) => ({

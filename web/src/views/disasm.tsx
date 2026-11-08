@@ -1,6 +1,6 @@
 // Shared rendering of one instruction's operands and auto-comments.
 
-import type { Instruction, Listing, OperandRef } from '../api.ts';
+import type { Instruction, Listing, OperandRef, ResolvedTarget } from '../api.ts';
 import { getState, navigate, setCursor, useStore } from '../store.ts';
 import { numberKey, operandTokens } from './tokens.ts';
 
@@ -108,10 +108,14 @@ export function followFrom(insn: Instruction | undefined, local: Set<string>): v
   const refs = resolveRefs(insn, local);
   const sel = selection?.kind === 'addr' ? refs.find((r) => r.addr === selection.addr) : undefined;
   if (sel) return void navigate(sel.addr, sel.kind === 'data' && !sel.local ? { view: 'hex' } : {});
+  const selResolved = selection?.kind === 'addr' ? commentTargets(insn).find((t) => t.addr === selection.addr) : undefined;
+  if (selResolved) return void follow(selResolved.addr, selResolved.kind);
   const target = insn.flow.kind !== 'fallthrough' ? insn.flow.targets[0] : undefined;
   if (target) return void navigate(target);
   const r = refs[0];
-  if (r) void navigate(r.addr, r.kind === 'data' && !r.local ? { view: 'hex' } : {});
+  if (r) return void navigate(r.addr, r.kind === 'data' && !r.local ? { view: 'hex' } : {});
+  const t = commentTargets(insn).find((x) => x.addr);
+  if (t) void follow(t.addr, t.kind);
 }
 
 /** Operand text as displayed (labels substituted), for layout. */
@@ -121,11 +125,67 @@ export function displayOperands(insn: Instruction, local: Set<string>): string {
   return text;
 }
 
-export function autoComment(insn: Instruction): string | null {
-  const s = insn.refs.find((r) => r.kind === 'string');
-  if (s) return JSON.stringify(s.label.length > 80 ? `${s.label.slice(0, 80)}…` : s.label);
-  return null;
+const quote = (text: string) => JSON.stringify(text.length > 80 ? `${text.slice(0, 80)}…` : text);
+
+/** How a resolved target reads in a comment: a string's text, else a name, else its address. */
+function targetText(t: ResolvedTarget): string {
+  if (t.kind === 'string') return quote(t.label);
+  return t.label || t.addr;
 }
+
+/** Targets the comment of `insn` names: an operand string, then what OpenDecomp resolved. */
+function commentTargets(insn: Instruction): ResolvedTarget[] {
+  const s = insn.refs.find((r) => r.kind === 'string');
+  const out: ResolvedTarget[] = s ? [{ addr: s.addr, kind: 'string', label: s.label, access: 'address' }] : [];
+  for (const t of insn.resolved ?? []) if (!out.some((o) => o.addr === t.addr && o.label === t.label)) out.push(t);
+  return out;
+}
+
+/** The auto-comment of an instruction as plain text (search, layout). */
+export function autoComment(insn: Instruction): string | null {
+  const targets = commentTargets(insn);
+  return targets.length ? targets.map(targetText).join(', ') : null;
+}
+
+/** The auto-comment, each target clickable: click selects it (X, Enter), double-click follows it. */
+export function AutoComment({ insn }: { insn: Instruction }) {
+  const selection = useStore((s) => s.selection);
+  const targets = commentTargets(insn);
+  return (
+    <>
+      {targets.map((t, i) => {
+        const text = targetText(t);
+        if (!t.addr) return <span key={i}>{i > 0 ? ', ' : ''}{text}</span>;
+        const selected = selection?.kind === 'addr' && selection.addr === t.addr;
+        return (
+          <span key={i}>
+            {i > 0 ? ', ' : ''}
+            <span
+              className={`ref ref-${t.kind === 'import' ? 'function' : t.kind}${selected ? ' selected' : ''}`}
+              data-k={t.kind === 'string' ? undefined : `n:${BigInt(t.addr).toString(16)}`}
+              title={`${t.addr}${t.label ? ` ${t.label}` : ''} (${t.access}) — X: xrefs · double-click or Enter: follow`}
+              onClick={(e) => {
+                e.stopPropagation();
+                setCursor(insn.addr, { kind: 'addr', addr: t.addr });
+              }}
+              onDoubleClick={(e) => {
+                e.stopPropagation();
+                void follow(t.addr, t.kind);
+              }}
+            >
+              {text}
+            </span>
+          </span>
+        );
+      })}
+    </>
+  );
+}
+
+function follow(addr: string, kind: string): Promise<void> {
+  return navigate(addr, kind === 'data' || kind === 'string' || kind === 'import' ? { view: 'hex' } : {});
+}
+
 
 export function mnemonicClass(insn: Instruction): string {
   const k = insn.flow.kind;

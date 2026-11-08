@@ -162,6 +162,15 @@ let failures = 0;
   await step('graph + hex + xrefs', async () => {
     await page.keyboard.press('Space');
     await page.waitForSelector('.gnode');
+    // X on a line acts on what it references: a call line gives the callee's xrefs...
+    await page.locator('.gline.insn:has(.mn-call)').first().dispatchEvent('click');
+    await page.keyboard.press('x');
+    await page.waitForSelector('.xref-table tbody tr');
+    const callee = await page.locator('.gline.insn.cursor .ref').first().innerText();
+    if (!(await page.locator('.xrefs-panel, .panel-head, body').first().innerText()).includes(`Xrefs to ${callee}`))
+      throw new Error(`X on a call line did not show xrefs to ${callee}`);
+    // ...and the function's entry line gives the function's callers.
+    await page.locator('.gline.insn').first().dispatchEvent('click');
     await page.keyboard.press('x');
     await page.waitForSelector('.xref-table tbody tr');
     await page.keyboard.press('h');
