@@ -6,6 +6,33 @@ export interface BinaryRecord {
   sha256: string;
   size: number;
   addedAt: string;
+  /** The companion debug file stored with the binary. */
+  debug?: DebugFileRecord;
+}
+
+/** A binary's companion debug file: `dsym` (the DWARF file of a .dSYM), `elf` (separate ELF
+ * debug file); `pdb` is recognised but not read yet. */
+export interface DebugFileRecord {
+  name: string;
+  sha256: string;
+  size: number;
+  kind: 'dsym' | 'elf' | 'pdb';
+  addedAt: string;
+}
+
+/** What OpenDecomp's debug recovery found (binary_info summary). */
+export interface DebugSummary {
+  source: 'none' | 'embedded' | 'companion';
+  status: 'absent' | 'complete' | 'partial';
+  matched_by: 'uuid' | 'build-id' | 'debuglink' | null;
+  uuid: string | null;
+  build_id: string | null;
+  companion_sha256: string | null;
+  functions: number;
+  types: number;
+  variables: number;
+  lines: number;
+  diagnostics: string[];
 }
 
 export interface FunctionSummary {
@@ -37,6 +64,7 @@ export interface ImageInfo {
     target: { format: string; architecture: string; abi: string; endian: string; address_bits: number };
     entry_points: { value: string }[];
     capabilities: { layer: string; feature: string; status: string; limitations: string[] }[];
+    debug?: DebugSummary;
   };
   revision: number;
   projectPath: string;
@@ -330,12 +358,21 @@ export const api = {
     return call<BinaryRecord>('upload', [file.name, bytes], undefined, [bytes.buffer]);
   },
   remove: (bid: string) => call<{ ok: true }>('remove', [bid]),
+  /** Add or replace the binary's debug file (dSYM DWARF file or zipped .dSYM, ELF debug file).
+   * Rejects with OpenDecomp's reason when it does not match the binary. */
+  addDebugFile: async (bid: string, file: File) => {
+    const bytes = new Uint8Array(await file.arrayBuffer());
+    return call<{ record: BinaryRecord }>('addDebugFile', [bid, file.name, bytes], undefined, [bytes.buffer]);
+  },
+  removeDebugFile: (bid: string) => call<{ record: BinaryRecord }>('removeDebugFile', [bid]),
   close: (bid: string) => call<{ ok: true }>('close', [bid]),
   download: (bid: string) => call<{ name: string; bytes: Uint8Array }>('download', [bid]),
   info: (bid: string) => call<ImageInfo>('info', [bid]),
   functions: (bid: string) =>
     call<{ revision: number; indexState: string; discovery: Discovery; functions: FunctionSummary[] }>('functions', [bid]),
   functionAt: (bid: string, addr: string) => call<{ function: FunctionSummary | null }>('functionAt', [bid, addr]),
+  /** Source file and line of an address from the binary's debug line table (null without one). */
+  sourceLine: (bid: string, addr: string) => call<{ source: { file: string; line: number; column: number | null } | null }>('sourceLine', [bid, addr]),
   listing: (bid: string, fid: string) => call<Listing>('listing', [bid, fid]),
   /** Rows of the whole-image listing: up to `before` rows before `addr` and `after` from it. */
   /** `quick`: stop at neighbouring functions not listed yet (a first paint; extensions fetch the rest). */

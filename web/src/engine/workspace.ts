@@ -6,10 +6,13 @@
 //   /workspace/meta/<id>.bookmarks.json  { "<va>": "description" }  (always loaded)
 //   /workspace/meta/<id>.data.json       WorkspaceData: data definitions and listing names
 //   /workspace/binaries/<id>/<name>      the binary          (loaded on open)
-//   /workspace/binaries/<id>/project/    OpenDecomp cache root
+//   /workspace/binaries/<id>/debug/<n>   its companion debug file, if any (BinaryRecord.debug)
+//   /workspace/binaries/<id>/project/    OpenDecomp cache root (one project per binary, and
+//                                        one per binary + debug file pair)
 //   /workspace/binaries/<id>/diffsig-v<V>-r<revision>.json   binary diff signatures (bindiff.ts)
 
 import { sha256 } from '@noble/hashes/sha2.js';
+import type { DebugFileRecord } from './debugfile.ts';
 import type { DataDef } from './linear.ts';
 import { vfs } from './vfs.ts';
 
@@ -19,6 +22,8 @@ export interface BinaryRecord {
   sha256: string;
   size: number;
   addedAt: string;
+  /** The companion debug file stored with the binary (dSYM DWARF, ELF debug file). */
+  debug?: DebugFileRecord;
 }
 
 /** What the listing keeps per binary besides comments. */
@@ -93,6 +98,54 @@ export class Workspace {
     return `${this.dir(id)}/project`;
   }
 
+  /** The stored debug file of a binary, or null. */
+  debugPath(record: BinaryRecord): string | null {
+    return record.debug ? `${this.dir(record.id)}/debug/${record.debug.name}` : null;
+  }
+
+  /** Stores `bytes` as the binary's debug file (replacing any previous one's bytes, not its
+   * project) and returns the updated record. The binary must be loaded. */
+  async setDebugFile(id: string, name: string, bytes: Uint8Array, kind: DebugFileRecord['kind']): Promise<BinaryRecord> {
+    const record = this.get(id);
+    if (!record) throw new Error(`Unknown binary ${id}`);
+    const previous = this.debugPath(record);
+    if (previous && vfs.get(previous)) vfs.unlink(previous);
+    const debug: DebugFileRecord = {
+      name: sanitizeFileName(name),
+      sha256: await sha256Hex(bytes),
+      size: bytes.byteLength,
+      kind,
+      addedAt: new Date().toISOString(),
+    };
+    const updated: BinaryRecord = { ...record, debug };
+    vfs.mkdir(`${this.dir(id)}/debug`, true);
+    vfs.write(this.debugPath(updated)!, bytes);
+    writeJson(`${META}/${id}.json`, updated);
+    await vfs.flush();
+    return updated;
+  }
+
+  /** Forgets the binary's debug file and the OpenDecomp project of the pair. */
+  async removeDebugFile(id: string): Promise<BinaryRecord> {
+    const record = this.get(id);
+    if (!record) throw new Error(`Unknown binary ${id}`);
+    if (!record.debug) return record;
+    const path = this.debugPath(record)!;
+    if (vfs.get(path)) vfs.unlink(path);
+    await this.removeDebugProject(id, record.debug.sha256);
+    const { debug: _debug, ...updated } = record;
+    writeJson(`${META}/${id}.json`, updated);
+    await vfs.flush();
+    return updated;
+  }
+
+  /** Deletes the OpenDecomp project of the binary paired with the debug file `sha256`
+   * (OpenDecomp names it `<sha256>.<slice>.debug-<debug sha256>`). */
+  async removeDebugProject(id: string, sha256: string): Promise<void> {
+    const root = this.projectRoot(id);
+    for (const name of await vfs.listStored(root)) if (name.endsWith(`.debug-${sha256}`)) await vfs.removeTree(`${root}/${name}`);
+  }
+
   /** The binary diff signature table of a project revision. */
   diffSigPath(id: string, version: number, revision: number): string {
     return `${this.dir(id)}/diffsig-v${version}-r${revision}.json`;
@@ -149,12 +202,18 @@ export class Workspace {
     project: Map<string, Uint8Array>,
     bookmarks: Record<string, string> = {},
     data: WorkspaceData = emptyData(),
+    debug?: Uint8Array,
   ): Promise<void> {
     const dir = this.dir(record.id);
     if (this.get(record.id) || vfs.get(dir)) throw new Error(`Binary ${record.id} already exists`);
+    if (!!record.debug !== !!debug) throw new Error('A debug file record needs its bytes, and bytes their record');
     const root = this.projectRoot(record.id);
     vfs.mkdir(dir, true);
     vfs.write(this.binaryPath(record), binary);
+    if (debug) {
+      vfs.mkdir(`${dir}/debug`, true);
+      vfs.write(this.debugPath(record)!, debug);
+    }
     for (const [rel, data] of project) {
       const path = vfs.norm(`${root}/${rel}`);
       // Defense in depth: the archive reader already rejects unsafe paths.

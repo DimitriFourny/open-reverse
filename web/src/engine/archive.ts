@@ -1,10 +1,13 @@
-// OpenReverse project archive (`<name>.orproj.zip`), format versions 1 and 2.
+// OpenReverse project archive (`<name>.orproj.zip`), format versions 1 to 3.
 //
 // A plain ZIP file holding one binary and everything OpenReverse keeps for it:
 //
 //   open-reverse.json     manifest: { format: "open-reverse-project", version,
 //                         generator, createdAt, record: BinaryRecord }
 //   binary/<record.name>  the binary itself (its SHA-256 must equal record.sha256)
+//   debug/<record.debug.name>  (version 3) the binary's companion debug file (dSYM DWARF,
+//                         ELF debug file), described by record.debug { name, sha256, size,
+//                         kind, addedAt }; written only when the binary has one
 //   comments.json         { "<0xaddr>": "text" } user comments
 //   bookmarks.json        (version 2) { "<0xaddr>": "description" } bookmarks
 //   data.json             (version 2) { "defs": { "<0xaddr>": { "type", "count", "od"? } },
@@ -22,6 +25,7 @@
 // only, no duplicate, absolute, `..`, backslash or control-character paths,
 // size limits, the binary hash, the record and the comments.
 
+import type { DebugFileRecord } from './debugfile.ts';
 import { DATA_TYPES } from './linear.ts';
 import { emptyData, isEmptyData, sanitizeFileName, sha256Hex, type WorkspaceData } from './workspace.ts';
 
@@ -30,7 +34,7 @@ import { DEFAULT_ZIP_LIMITS, ZipError, zipDecode, zipEncode, type ZipEntry, type
 
 export const ARCHIVE_FORMAT = 'open-reverse-project';
 /** The newest version this code reads and writes. */
-export const ARCHIVE_VERSION = 2;
+export const ARCHIVE_VERSION = 3;
 export const ARCHIVE_MANIFEST = 'open-reverse.json';
 export const ARCHIVE_EXTENSION = '.orproj.zip';
 
@@ -40,11 +44,14 @@ export interface ArchiveRecord {
   sha256: string;
   size: number;
   addedAt: string;
+  debug?: DebugFileRecord;
 }
 
 export interface ProjectArchive {
   record: ArchiveRecord;
   binary: Uint8Array;
+  /** The companion debug file (exactly when `record.debug` is set). */
+  debug?: Uint8Array;
   comments: Record<string, string>;
   /** Bookmarked addresses and their descriptions (empty when the archive has none). */
   bookmarks?: Record<string, string>;
@@ -112,15 +119,17 @@ export async function encodeProjectArchive(
   const hasData = !isEmptyData(data);
   const manifest: ArchiveManifest = {
     format: ARCHIVE_FORMAT,
-    // The oldest version that holds everything: version 1 readers reject unknown entries.
-    version: hasBookmarks || hasData ? 2 : 1,
+    // The oldest version that holds everything: older readers reject unknown entries.
+    version: archive.record.debug ? 3 : hasBookmarks || hasData ? 2 : 1,
     generator: 'OpenReverse',
     createdAt: createdAt.toISOString(),
     record: archive.record,
   };
+  if (!!archive.record.debug !== !!archive.debug) throw new ArchiveError('A debug file record needs its bytes');
   const entries: ZipEntry[] = [
     { path: ARCHIVE_MANIFEST, data: enc.encode(`${JSON.stringify(manifest, null, 2)}\n`) },
     { path: `binary/${archive.record.name}`, data: archive.binary },
+    ...(archive.record.debug && archive.debug ? [{ path: `debug/${archive.record.debug.name}`, data: archive.debug }] : []),
     { path: 'comments.json', data: enc.encode(JSON.stringify(archive.comments)) },
     ...(hasBookmarks ? [{ path: 'bookmarks.json', data: enc.encode(JSON.stringify(bookmarks)) }] : []),
   ];
@@ -153,7 +162,29 @@ function validateRecord(value: unknown): ArchiveRecord {
   if (typeof r.name !== 'string' || r.name === '' || sanitizeFileName(r.name) !== r.name) throw new ArchiveError('Invalid binary name in the manifest');
   if (typeof r.size !== 'number' || !Number.isSafeInteger(r.size) || r.size <= 0) throw new ArchiveError('Invalid binary size in the manifest');
   if (typeof r.addedAt !== 'string' || Number.isNaN(Date.parse(r.addedAt))) throw new ArchiveError('Invalid date in the manifest');
-  return { id: r.id, name: r.name, sha256: r.sha256, size: r.size, addedAt: r.addedAt };
+  const debug = r.debug === undefined ? undefined : validateDebugRecord(r.debug);
+  return { id: r.id, name: r.name, sha256: r.sha256, size: r.size, addedAt: r.addedAt, ...(debug ? { debug } : {}) };
+}
+
+function validateDebugRecord(value: unknown): DebugFileRecord {
+  const d = value as Partial<DebugFileRecord> | null;
+  if (
+    !d ||
+    typeof d !== 'object' ||
+    typeof d.name !== 'string' ||
+    d.name === '' ||
+    sanitizeFileName(d.name) !== d.name ||
+    typeof d.sha256 !== 'string' ||
+    !/^[0-9a-f]{64}$/.test(d.sha256) ||
+    typeof d.size !== 'number' ||
+    !Number.isSafeInteger(d.size) ||
+    d.size <= 0 ||
+    !['dsym', 'elf', 'pdb'].includes(d.kind as string) ||
+    typeof d.addedAt !== 'string' ||
+    Number.isNaN(Date.parse(d.addedAt))
+  )
+    throw new ArchiveError('Invalid debug file record in the manifest');
+  return { name: d.name, sha256: d.sha256, size: d.size, kind: d.kind!, addedAt: d.addedAt };
 }
 
 /** comments.json and bookmarks.json: `{ "<0xaddr>": "text" }`. */
@@ -229,8 +260,11 @@ export async function decodeProjectArchive(bytes: Uint8Array, limits: ArchiveLim
   if (manifest.version > ARCHIVE_VERSION)
     throw new ArchiveError(`This archive has format version ${manifest.version}; this OpenReverse reads versions 1 to ${ARCHIVE_VERSION}. Update OpenReverse.`);
   const record = validateRecord(manifest.record);
+  if (record.debug && manifest.version < 3) throw new ArchiveError('A debug file record needs archive version 3');
 
   const binaryPath = `binary/${record.name}`;
+  const debugPath = record.debug ? `debug/${record.debug.name}` : null;
+  let debug: Uint8Array | null = null;
   let binary: Uint8Array | null = null;
   let comments: Record<string, string> = {};
   let bookmarks: Record<string, string> = {};
@@ -239,6 +273,8 @@ export async function decodeProjectArchive(bytes: Uint8Array, limits: ArchiveLim
   for (const [path, data] of byPath) {
     if (path === ARCHIVE_MANIFEST) continue;
     if (path === binaryPath) binary = data;
+    else if (path === debugPath) debug = data;
+    else if (path === 'debug/' && debugPath) continue;
     else if (path === 'comments.json') comments = validateAddressTexts(parseJson(data, 'comments.json'), 'comment');
     else if (path === 'bookmarks.json' && manifest.version >= 2) bookmarks = validateAddressTexts(parseJson(data, 'bookmarks.json'), 'bookmark');
     else if (path === 'data.json' && manifest.version >= 2) workspaceData = validateData(parseJson(data, 'data.json'));
@@ -262,5 +298,10 @@ export async function decodeProjectArchive(bytes: Uint8Array, limits: ArchiveLim
   if (!binary) throw new ArchiveError(`The archive has no binary (${binaryPath})`);
   if (binary.byteLength !== record.size) throw new ArchiveError('The binary size does not match the manifest');
   if ((await sha256Hex(binary)) !== record.sha256) throw new ArchiveError('The binary does not match its sha256 (corrupt archive)');
-  return { record, binary, comments, bookmarks, data: workspaceData, project };
+  if (record.debug) {
+    if (!debug) throw new ArchiveError(`The archive has no debug file (${debugPath})`);
+    if (debug.byteLength !== record.debug.size || (await sha256Hex(debug)) !== record.debug.sha256)
+      throw new ArchiveError('The debug file does not match its sha256 (corrupt archive)');
+  }
+  return { record, binary, ...(debug ? { debug } : {}), comments, bookmarks, data: workspaceData, project };
 }

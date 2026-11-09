@@ -15,6 +15,7 @@ import {
   useStore,
   type Dialog,
 } from '../store.ts';
+import { DebugInfoDialog } from './DebugInfo.tsx';
 import { DiffPicker } from './DiffView.tsx';
 import { cmpAddr, functionOffset, mangledNote, padAddr, parseAddress } from '../util.ts';
 
@@ -366,6 +367,7 @@ export function Dialogs() {
     );
   if (dialog.kind === 'bookmarks') return <BookmarksDialog />;
   if (dialog.kind === 'diffWith') return <DiffPicker />;
+  if (dialog.kind === 'debugInfo') return <DebugInfoDialog onClose={close} />;
   return null;
 }
 

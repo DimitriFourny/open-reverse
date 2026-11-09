@@ -2,6 +2,7 @@
 // One AnalysisSession per open binary.
 
 import { ArchiveError, archiveFileName, decodeProjectArchive, encodeProjectArchive } from './archive.ts';
+import { DebugFileError, readDebugFile } from './debugfile.ts';
 import { canon, parseAddress } from './hex.ts';
 import { AnalysisSession, ApiError, type AnnotationSnapshot, type DataAction } from './session.ts';
 import { vfs } from './vfs.ts';
@@ -141,6 +142,71 @@ export class Engine {
     return { ok: true };
   }
 
+  /**
+   * Adds (or replaces) the binary's companion debug file: the DWARF file of a dSYM (or a
+   * zipped .dSYM bundle), or an ELF debug file. The binary reopens paired with it, in an
+   * OpenDecomp project of its own; when OpenDecomp does not match it to the binary
+   * (UUID, build ID, debuglink CRC), the previous state is restored and the error says why.
+   */
+  async addDebugFile(bid: string, name: string, bytes: Uint8Array): Promise<{ record: BinaryRecord }> {
+    const record = this.workspace.get(bid);
+    if (!record) throw new ApiError(404, `Unknown binary ${bid}`);
+    let file: Awaited<ReturnType<typeof readDebugFile>>;
+    try {
+      file = await readDebugFile(name, bytes);
+    } catch (e) {
+      if (e instanceof DebugFileError) throw new ApiError(400, e.message);
+      throw e;
+    }
+    const swap = await this.#exclusive(bid, async () => {
+      const previousPath = this.workspace.debugPath(record);
+      const previous = record.debug && previousPath ? { ...record.debug, bytes: vfs.read(previousPath).slice() } : null;
+      return { previous, updated: await this.workspace.setDebugFile(bid, file.name, file.bytes, file.kind) };
+    });
+    const { previous, updated } = swap;
+    try {
+      await this.#session(bid); // OpenDecomp imports the pair, matching the debug file first
+    } catch (e) {
+      await this.#exclusive(bid, async () => {
+        if (previous) await this.workspace.setDebugFile(bid, previous.name, previous.bytes, previous.kind);
+        else await this.workspace.removeDebugFile(bid);
+        await this.workspace.removeDebugProject(bid, updated.debug!.sha256);
+      });
+      throw new ApiError(400, `${file.name} is not the debug file of ${record.name}: ${e instanceof Error ? e.message : String(e)}`);
+    }
+    if (previous && previous.sha256 !== updated.debug!.sha256) await this.workspace.removeDebugProject(bid, previous.sha256);
+    return { record: updated };
+  }
+
+  /** Forgets the binary's debug file (and its paired project); the binary reopens without it. */
+  async removeDebugFile(bid: string): Promise<{ record: BinaryRecord }> {
+    if (!this.workspace.get(bid)) throw new ApiError(404, `Unknown binary ${bid}`);
+    return { record: await this.#exclusive(bid, () => this.workspace.removeDebugFile(bid)) };
+  }
+
+  /**
+   * Runs `fn` with the binary's session closed and its files loaded, while no session can
+   * open: a call that needs the binary meanwhile (the UI polling it) waits and then opens it
+   * from the record `fn` left, never from the one it replaces.
+   */
+  async #exclusive<T>(bid: string, fn: () => Promise<T>): Promise<T> {
+    const previous = this.#closing.get(bid);
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => (release = resolve));
+    this.#closing.set(bid, gate);
+    try {
+      await previous;
+      const session = this.#sessions.get(bid);
+      this.#sessions.delete(bid);
+      await (await session?.catch(() => null))?.close();
+      await this.workspace.load(bid);
+      return await fn();
+    } finally {
+      release();
+      if (this.#closing.get(bid) === gate) this.#closing.delete(bid);
+    }
+  }
+
   /** The raw bytes of a stored binary (download). */
   async download(bid: string): Promise<{ name: string; bytes: Uint8Array }> {
     const record = this.workspace.get(bid);
@@ -194,7 +260,7 @@ export class Engine {
     ctx.signal.throwIfAborted();
     ctx.progress({ phase: 'write', done: 0, total: null });
     if (existing) await this.remove(record.id);
-    await this.workspace.restore(record, archive.binary, archive.comments, archive.project, archive.bookmarks, archive.data);
+    await this.workspace.restore(record, archive.binary, archive.comments, archive.project, archive.bookmarks, archive.data, archive.debug);
     await this.workspace.unload(record.id);
     return { status: 'imported', record, replaced: !!existing };
   }
@@ -239,6 +305,11 @@ export class Engine {
     const s = await this.#session(bid);
     const index = await s.functions();
     return { revision: index.revision, indexState: index.indexState, discovery: s.discovery, functions: index.list };
+  }
+
+  /** The debug line table's source line at an address, or null. */
+  async sourceLine(bid: string, a: string) {
+    return { source: await (await this.#session(bid)).sourceLine(addr(a)) };
   }
 
   async functionAt(bid: string, a: string) {

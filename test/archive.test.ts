@@ -215,7 +215,7 @@ describe('project archive', () => {
         edit(m);
         e.data = enc.encode(JSON.stringify(m));
       });
-    await assert.rejects(decodeProjectArchive(await editManifest((m) => (m.version = 3))), /format version 3/);
+    await assert.rejects(decodeProjectArchive(await editManifest((m) => (m.version = 4))), /format version 4/);
     await assert.rejects(decodeProjectArchive(await editManifest((m) => (m.format = 'other'))), /unknown format/);
     await assert.rejects(decodeProjectArchive(await editManifest((m) => (m.record.id = '0000000000000000'))), /id does not match/);
     await assert.rejects(decodeProjectArchive(await editManifest((m) => (m.record.name = '../x'))), /Invalid binary name/);
@@ -244,5 +244,48 @@ describe('project archive', () => {
       decodeProjectArchive(bytes, { maxArchiveBytes: 100, maxEntries: 1e6, maxEntryBytes: 1e9, maxTotalBytes: 1e9 }),
       /too large/,
     );
+  });
+
+  test('debug file: version 3 with debug/<name>, verified against its record', async () => {
+    const a = sample();
+    const debug = new Uint8Array(3000).map((_, i) => (i * 13) & 255);
+    const sha256 = createHash('sha256').update(debug).digest('hex');
+    a.record = { ...a.record, debug: { name: 'demo.debug', sha256, size: debug.length, kind: 'elf', addedAt: '2026-01-02T03:04:05.000Z' } };
+    a.debug = debug;
+    const bytes = await encodeProjectArchive(a);
+    const manifest = JSON.parse(new TextDecoder().decode((await zipDecode(bytes)).find((e) => e.path === ARCHIVE_MANIFEST)!.data));
+    assert.equal(manifest.version, 3);
+    const back = await decodeProjectArchive(bytes);
+    assert.deepEqual(back.record.debug, a.record.debug);
+    assert.deepEqual(back.debug, debug);
+    // Without a debug file nothing changes: version 1 or 2 as before, no debug entry.
+    const plain = await encodeProjectArchive(sample());
+    assert.ok(!(await zipDecode(plain)).some((e) => e.path.startsWith('debug/')));
+    assert.equal((await decodeProjectArchive(plain)).debug, undefined);
+    // Damage, a missing entry, an older version or a record without bytes are refused.
+    await assert.rejects(
+      decodeProjectArchive(await mutate(bytes, (es) => (es.find((e) => e.path === 'debug/demo.debug')!.data = new Uint8Array(3000)))),
+      /debug file does not match/,
+    );
+    await assert.rejects(decodeProjectArchive(await mutate(bytes, (es) => es.splice(es.findIndex((e) => e.path === 'debug/demo.debug'), 1))), /no debug file/);
+    await assert.rejects(
+      decodeProjectArchive(
+        await mutate(bytes, (es) => {
+          const m = es.find((e) => e.path === ARCHIVE_MANIFEST)!;
+          m.data = enc.encode(JSON.stringify({ ...manifest, version: 2 }));
+        }),
+      ),
+      /needs archive version 3/,
+    );
+    await assert.rejects(
+      decodeProjectArchive(
+        await mutate(bytes, (es) => {
+          const m = es.find((e) => e.path === ARCHIVE_MANIFEST)!;
+          m.data = enc.encode(JSON.stringify({ ...manifest, record: { ...manifest.record, debug: { ...manifest.record.debug, name: '../x' } } }));
+        }),
+      ),
+      /Invalid debug file record/,
+    );
+    await assert.rejects(encodeProjectArchive({ ...a, debug: undefined } as ProjectArchive), /needs its bytes/);
   });
 });

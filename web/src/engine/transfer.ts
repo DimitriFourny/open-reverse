@@ -31,13 +31,15 @@ export async function snapshotProject(workspace: Workspace, record: BinaryRecord
   await quiesce(workspace.dir(record.id), ctx.signal);
   // No await from here on: nothing else runs while the snapshot is taken.
   const binary = vfs.snapshot(workspace.binaryPath(record));
+  const debugPath = workspace.debugPath(record);
+  const debug = debugPath ? vfs.snapshot(debugPath) : undefined;
   const project = new Map<string, Uint8Array>();
   for (const [path, node] of vfs.nodes)
     if (node.kind === 'file' && path.startsWith(`${root}/`)) project.set(path.slice(root.length + 1), vfs.snapshot(path));
   const comments = await workspace.comments(record.id);
   const bookmarks = await workspace.bookmarks(record.id);
   const data = await workspace.data(record.id);
-  return { record, binary, comments, bookmarks, data, project };
+  return { record, binary, ...(debug ? { debug } : {}), comments, bookmarks, data, project };
 }
 
 // ---------------------------------------------------------------- pseudocode
@@ -147,11 +149,13 @@ export async function storageUsage(workspace: Workspace): Promise<BinaryUsage[]>
   for (const record of workspace.list()) {
     const sizes = await vfs.usage(workspace.dir(record.id));
     const binaryPath = workspace.binaryPath(record);
+    const debugPath = workspace.debugPath(record);
     const root = `${workspace.projectRoot(record.id)}/`;
     let binary = 0;
     let project = 0;
     for (const [path, size] of sizes) {
-      if (path === binaryPath) binary += size;
+      // The binary's inputs: itself and its debug file.
+      if (path === binaryPath || path === debugPath) binary += size;
       else if (path.startsWith(root)) project += size;
       else project += size;
     }
