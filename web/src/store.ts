@@ -565,6 +565,9 @@ export async function loadDecompilation(): Promise<void> {
   const key = `${fnId}@${revision}@${options.language}/${options.inference}/${options.view}`;
   const cached = decompCache.get(key);
   if (cached) {
+    // A decompile still running for the function left behind must not replace this one when it ends.
+    decompAbort?.abort();
+    decompAbort = null;
     if (state.decomp.data !== cached) setState({ decomp: { status: 'ready', data: cached, error: null } });
     return;
   }

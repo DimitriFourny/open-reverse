@@ -189,6 +189,10 @@ export class DatabaseSync {
     this.#shared = null;
     s.release();
   }
+  /** @internal Throws the error of a failed SQLite call on this database. */
+  _check(rc: number): void {
+    this.#db().checkRc(rc);
+  }
   /** @internal */
   _changes(): { changes: number; lastInsertRowid: number | bigint } {
     const { capi } = api();
@@ -206,11 +210,31 @@ function bindValue(v: unknown): Value {
   throw new TypeError(`Provided value cannot be bound to SQLite parameter: ${typeof v}`);
 }
 
+/** Raw SQLite exports, used where the oo1 wrappers cost more than the call (binding and
+ * reading every column of every row: OpenDecomp reads and writes records in bulk). */
+interface Raw {
+  sqlite3_bind_null(stmt: number, index: number): number;
+  sqlite3_bind_int(stmt: number, index: number, value: number): number;
+  sqlite3_bind_int64(stmt: number, index: number, value: bigint): number;
+  sqlite3_bind_double(stmt: number, index: number, value: number): number;
+  sqlite3_bind_text(stmt: number, index: number, text: number, bytes: number, destructor: number): number;
+  sqlite3_bind_blob(stmt: number, index: number, data: number, bytes: number, destructor: number): number;
+  sqlite3_column_type(stmt: number, index: number): number;
+  sqlite3_column_int64(stmt: number, index: number): bigint;
+  sqlite3_column_double(stmt: number, index: number): number;
+  sqlite3_column_text(stmt: number, index: number): number;
+  sqlite3_column_blob(stmt: number, index: number): number;
+  sqlite3_column_bytes(stmt: number, index: number): number;
+}
+const encoder = new TextEncoder();
+const decoder = new TextDecoder();
+
 export class StatementSync {
   readonly #owner: DatabaseSync;
   readonly #stmt: PreparedStatement;
   readonly sourceSQL: string;
   #readBigInts = false;
+  #names: string[] | null = null;
   constructor(owner: DatabaseSync, stmt: PreparedStatement, sql: string) {
     this.#owner = owner;
     this.#stmt = stmt;
@@ -221,16 +245,74 @@ export class StatementSync {
     st.reset(true);
     if (params.length === 0) return;
     if (params.length === 1 && params[0] !== null && typeof params[0] === 'object' && !ArrayBuffer.isView(params[0])) {
-      const named: Record<string, Value> = {};
-      for (const [k, v] of Object.entries(params[0] as Record<string, unknown>)) named[/^[:@$]/.test(k) ? k : `:${k}`] = bindValue(v);
-      st.bind(named);
+      const { capi } = api();
+      for (const [k, v] of Object.entries(params[0] as Record<string, unknown>)) {
+        const index = capi.sqlite3_bind_parameter_index(st.pointer!, /^[:@$]/.test(k) ? k : `:${k}`);
+        if (!index) throw new RangeError(`Invalid bind() parameter name: ${k}`);
+        this.#bindAt(index, bindValue(v));
+      }
       return;
     }
-    st.bind(params.map(bindValue));
+    params.forEach((v, i) => this.#bindAt(i + 1, bindValue(v)));
+  }
+  #bindAt(index: number, value: Value): void {
+    const s = api();
+    const raw = s.wasm.exports as unknown as Raw;
+    const p = this.#stmt.pointer as number;
+    let rc: number;
+    if (value === null) rc = raw.sqlite3_bind_null(p, index);
+    else if (typeof value === 'string') {
+      // UTF-8 straight into WASM memory (at most 3 bytes per UTF-16 unit); SQLite frees it.
+      const room = value.length * 3 + 1;
+      const ptr = s.wasm.alloc(room) as number;
+      const { written } = encoder.encodeInto(value, s.wasm.heap8u().subarray(ptr, ptr + room));
+      rc = raw.sqlite3_bind_text(p, index, ptr, written, s.capi.SQLITE_WASM_DEALLOC as number);
+    } else if (typeof value === 'number')
+      rc = (value | 0) === value ? raw.sqlite3_bind_int(p, index, value) : Number.isInteger(value) ? raw.sqlite3_bind_int64(p, index, BigInt(value)) : raw.sqlite3_bind_double(p, index, value);
+    else if (typeof value === 'bigint') {
+      if (value < -(1n << 63n) || value >= 1n << 63n) throw new RangeError(`BigInt value is too big to store without precision loss: ${value}`);
+      rc = raw.sqlite3_bind_int64(p, index, value);
+    } else {
+      const ptr = s.wasm.alloc(value.byteLength || 1) as number;
+      s.wasm.heap8u().set(value, ptr);
+      rc = raw.sqlite3_bind_blob(p, index, ptr, value.byteLength, s.capi.SQLITE_WASM_DEALLOC as number);
+    }
+    if (rc) this.#owner._check(rc);
   }
   #row(): Record<string, Value> {
-    const row = this.#stmt.get({}) as Record<string, Value>;
-    if (this.#readBigInts) for (const k in row) if (typeof row[k] === 'number' && Number.isInteger(row[k])) row[k] = BigInt(row[k] as number);
+    const s = api();
+    const raw = s.wasm.exports as unknown as Raw;
+    const { capi } = s;
+    const p = this.#stmt.pointer as number;
+    const names = (this.#names ??= this.#stmt.getColumnNames());
+    const row: Record<string, Value> = {};
+    for (let i = 0; i < names.length; i++) {
+      let v: Value;
+      switch (raw.sqlite3_column_type(p, i)) {
+        case capi.SQLITE_NULL:
+          v = null;
+          break;
+        case capi.SQLITE_INTEGER: {
+          const n = raw.sqlite3_column_int64(p, i);
+          v = this.#readBigInts ? n : n >= -9007199254740991n && n <= 9007199254740991n ? Number(n) : n;
+          break;
+        }
+        case capi.SQLITE_FLOAT:
+          v = raw.sqlite3_column_double(p, i);
+          break;
+        case capi.SQLITE_TEXT: {
+          const ptr = raw.sqlite3_column_text(p, i);
+          v = ptr ? decoder.decode(s.wasm.heap8u().subarray(ptr, ptr + raw.sqlite3_column_bytes(p, i))) : '';
+          break;
+        }
+        default: {
+          const ptr = raw.sqlite3_column_blob(p, i);
+          const n = raw.sqlite3_column_bytes(p, i);
+          v = ptr ? s.wasm.heap8u().slice(ptr, ptr + n) : new Uint8Array(0);
+        }
+      }
+      row[names[i]!] = v;
+    }
     return row;
   }
   setReadBigInts(enabled: boolean): void {
