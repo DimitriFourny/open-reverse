@@ -32,6 +32,7 @@ import {
   beginBookmark,
   beginComment,
   beginCreateStruct,
+  beginEnum,
   beginRename,
   beginSignature,
   beginXrefs,
@@ -61,6 +62,7 @@ import { HexView } from './views/HexView.tsx';
 import { LinearView } from './views/LinearView.tsx';
 import { PseudoView } from './views/PseudoView.tsx';
 import { TypesView } from './views/TypesView.tsx';
+import { focusTypeLibraries } from './views/TypeLibraries.tsx';
 import { HighlightStyle, getUi, openFind, setUi } from './views/codeui.tsx';
 
 function useKeyboard() {
@@ -88,6 +90,11 @@ function useKeyboard() {
       else if (e.altKey && !e.ctrlKey && !e.metaKey && e.code === 'KeyI') openSearch('immediate');
       // IDA's script snippets (Shift+F2): the JavaScript console.
       else if (k === 'F2' && e.shiftKey && plain) toggleConsole();
+      // IDA's type libraries (Shift+F11): the Types view's bundled header types.
+      else if (k === 'F11' && e.shiftKey && plain) {
+        setView('types');
+        focusTypeLibraries();
+      }
       // IDA's signatures window (Shift+F5): library signatures.
       else if (k === 'F5' && e.shiftKey && plain) setState({ dialog: { kind: 'signatures' } });
       else if ((e.ctrlKey || e.metaKey) && (k === 'p' || k === 'k')) {
@@ -108,6 +115,8 @@ function useKeyboard() {
       else if (k === 'x' || k === 'X') beginXrefs();
       else if (k === 'y' || k === 'Y') void beginSignature();
       else if (k === 's' || k === 'S') beginCreateStruct();
+      // IDA's M: display the selected constant as an enum member.
+      else if (k === 'm' || k === 'M') beginEnum(getUi().highlight);
       else if (k === ';' || k === '/') beginComment();
       else if (dataKeys(s.loc?.view) && (k === 'd' || k === 'D')) void defineData('cycle');
       else if (dataKeys(s.loc?.view) && (k === 'a' || k === 'A')) void defineData('string');

@@ -4,9 +4,10 @@
 import { useEffect, useMemo, useRef } from 'react';
 import type { Decompilation, GlobalRef, Mapping, Variable } from '../api.ts';
 import { getState, navigate, setState, useStore } from '../store.ts';
+import { formatEnum } from '../engine/enums.ts';
 import { splitLines, tokenize, type Token } from '../syntax.ts';
 import { FindBar, onCodeMouseDown, useDomFind } from './codeui.tsx';
-import { pseudoKey } from './tokens.ts';
+import { numberKey, pseudoKey } from './tokens.ts';
 import { mangledNote } from '../util.ts';
 
 /** Most specific mapping containing a text offset: shortest span, then fewest addresses. */
@@ -46,6 +47,21 @@ export function PseudoView({ decomp }: { decomp: Decompilation }) {
   const linesRef = useRef<HTMLDivElement>(null);
 
   const lines = useMemo(() => splitLines(tokenize(decomp.text, decomp.language)), [decomp]);
+  const displays = useStore((s) => s.enumDisplays);
+  const catalog = useStore((s) => s.enumCatalog);
+  /** A number token shown as an enum (M) at one of the instructions its statement maps to. */
+  const enumText = (t: Token): string | null => {
+    if (t.kind !== 'num' || !catalog) return null;
+    const key = numberKey(t.text);
+    if (!key) return null;
+    const m = mappingAt(decomp.mappings, t.start, decomp.declarationSpan);
+    for (const addr of m?.addrs ?? []) {
+      const id = displays[`${addr}|${key.slice(2)}`];
+      const def = id ? catalog.find((d) => d.id === id) : undefined;
+      if (def) return formatEnum(def, BigInt(`0x${key.slice(2)}`));
+    }
+    return null;
+  };
   const variables = useMemo(() => new Map((decomp.variables ?? []).map((v) => [v.name, v])), [decomp]);
   const globals = useMemo(() => new Map((decomp.globals ?? []).map((g) => [g.name, g])), [decomp]);
   /** The parameter, local or global a token names (not a member after `.` or `->`). */
@@ -120,11 +136,12 @@ export function PseudoView({ decomp }: { decomp: Decompilation }) {
                     (variable && selection?.kind === 'variable' && selection.id === variable.id) ||
                     (global && selection?.kind === 'addr' && selection.addr === global.addr);
                   const k = pseudoKey(t.kind, t.text);
+                  const shown = enumText(t);
                   return (
                     <span
                       key={t.start}
                       data-k={k ?? undefined}
-                      className={`tok t-${fn ? 'fn' : t.kind}${variable ? ' t-var' : ''}${global ? ' t-global' : ''}${hot(t) ? ' hot' : ''}${sel ? ' selected' : ''}`}
+                      className={`tok t-${fn ? 'fn' : t.kind}${shown ? ' t-enum' : ''}${variable ? ' t-var' : ''}${global ? ' t-global' : ''}${hot(t) ? ' hot' : ''}${sel ? ' selected' : ''}`}
                       onClick={() => onToken(t, variable, global)}
                       onDoubleClick={fn ? () => void navigate(fn.entry) : undefined}
                       title={
@@ -134,10 +151,14 @@ export function PseudoView({ decomp }: { decomp: Decompilation }) {
                             ? `${variable.parameter ? 'parameter' : 'local'} ${variable.type ? `${variable.type} ` : ''}${variable.name} — N rename · Y retype${/^(?:const )?struct_[0-9a-f]+ \*$/.test(variable.type ?? '') ? ' · S create structure' : ''}`
                             : global
                               ? `global ${global.type} ${global.name} @ ${global.addr} — N rename · Y retype · X xrefs`
-                              : undefined
+                              : shown
+                                ? `${t.text} shown as an enum — M changes it`
+                                : t.kind === 'num'
+                                  ? 'M: display as an enum member'
+                                  : undefined
                       }
                     >
-                      {t.text}
+                      {shown ?? t.text}
                     </span>
                   );
                 })}

@@ -23,8 +23,10 @@ import {
   type XrefDirection,
   type DebugSummary,
   type SignatureApplication,
+  type EnumDef,
 } from './api.ts';
 import { historyFor, type UndoEntry } from './undo.ts';
+import { operandTokens } from './views/tokens.ts';
 import { looksLikeDebugFile } from './engine/debugfile.ts';
 import { canon, cIdentifier } from './util.ts';
 
@@ -65,6 +67,8 @@ export type Dialog =
   | { kind: 'createStruct'; fnId: string; valueId: string; variable: string; type: string }
   /** Alt+M: bookmark an address (current: its description when already bookmarked). */
   | { kind: 'bookmark'; addr: string; current: string | null }
+  /** M on a constant: display it as an enum (`key`: `<0xinsn>|<hex value>`). */
+  | { kind: 'enum'; key: string; value: string }
   /** Ctrl+M: the bookmark list. */
   | { kind: 'bookmarks' }
   /** Pick the other binary to diff the open one with. */
@@ -109,6 +113,10 @@ export interface State {
   /** Bumped when data definitions or listing names change (the linear view reloads). */
   dataVersion: number;
   bookmarks: Record<string, string>;
+  /** Constants displayed as an enum (M): `<0xinsn>|<hex value>` -> enum id. */
+  enumDisplays: Record<string, string>;
+  /** The enums M can pick from (bundled for the platform, then declared), loaded on first use. */
+  enumCatalog: EnumDef[] | null;
   selection: Selection | null;
   /** Instructions highlighted from a pseudo-code click. */
   linked: Set<string>;
@@ -164,6 +172,8 @@ let state: State = {
   comments: {},
   dataVersion: 0,
   bookmarks: {},
+  enumDisplays: {},
+  enumCatalog: null,
   selection: null,
   linked: new Set(),
   xrefs: null,
@@ -355,6 +365,8 @@ export function closeBinary(next?: string): void {
     decomp: idle(),
     comments: {},
     bookmarks: {},
+    enumDisplays: {},
+    enumCatalog: null,
     selection: null,
     linked: new Set(),
     xrefs: null,
@@ -374,8 +386,9 @@ export async function openBinary(bid: string, at?: { addr: string | null; view: 
     if (getState().bid !== bid) return;
     setState({ info });
     await loadFunctions();
-    const [{ comments }, { bookmarks }] = await Promise.all([api.comments(bid), api.bookmarks(bid)]);
-    setState({ comments, bookmarks });
+    const [{ comments }, { bookmarks }, { enums }] = await Promise.all([api.comments(bid), api.bookmarks(bid), api.enumDisplays(bid)]);
+    setState({ comments, bookmarks, enumDisplays: enums });
+    if (Object.keys(enums).length) void loadEnumCatalog();
     const target = at?.addr ?? pickStart();
     if (target) await navigate(target, { view: at?.view ?? 'linear', replace: true });
     schedulePoll();
@@ -960,6 +973,55 @@ export function createFunction(): void {
   );
 }
 
+/** The enums M offers, loaded once per binary (declaring types reloads them). */
+export async function loadEnumCatalog(): Promise<EnumDef[]> {
+  if (state.enumCatalog) return state.enumCatalog;
+  const bid = state.bid!;
+  const { enums } = await api.enumCatalog(bid);
+  if (state.bid === bid) setState({ enumCatalog: enums });
+  return enums;
+}
+
+/**
+ * M (IDA's symbolic constant): display the selected constant — a number token of the
+ * pseudocode or an immediate of the disassembly, at the current instruction — as an enum.
+ */
+export function beginEnum(highlight: string | null): void {
+  const addr = state.loc?.addr;
+  const key = highlight;
+  if (!addr || !key?.startsWith('n:')) return void toast('Select a constant first (click a number), then press M', 'error');
+  const value = key.slice(2);
+  // From the pseudocode, the statement's instructions are linked: prefer the one whose operand holds the value.
+  const holder = state.listing.data?.instructions.find(
+    (i) => state.linked.has(i.addr) && operandTokens(i.operands).some((t) => t.key === key),
+  );
+  const at = holder?.addr ?? addr;
+  void loadEnumCatalog().then(() => setState({ dialog: { kind: 'enum', key: `${at}|${value}`, value } }));
+}
+
+async function applyEnumDisplay(key: string, id: string | null): Promise<void> {
+  const { enums } = await api.setEnumDisplay(state.bid!, key, id);
+  setState({ enumDisplays: enums });
+}
+
+/** Shows the constant `key` as enum `id` (null: as a number again); undoable. */
+export const setEnumDisplay = tracked(async (key: string, id: string | null): Promise<void> => {
+  const bid = state.bid;
+  if (!bid) return;
+  const previous = state.enumDisplays[key] ?? null;
+  if (previous === id) return;
+  try {
+    await applyEnumDisplay(key, id);
+    record(bid, {
+      label: `enum display of ${key.split('|')[1] ? `0x${key.split('|')[1]}` : key}`,
+      undo: () => applyEnumDisplay(key, previous),
+      redo: () => applyEnumDisplay(key, id),
+    });
+  } catch (e) {
+    toast(errorText(e), 'error');
+  }
+});
+
 export function beginComment(): void {
   const addr = state.loc?.addr;
   if (!addr) return;
@@ -1009,6 +1071,7 @@ async function refreshAfterAnnotation(): Promise<void> {
 
 async function applyDeclare(source: string): Promise<Record<string, string>> {
   const { annotations } = await api.declareTypes(state.bid!, source);
+  setState({ enumCatalog: null });
   await refreshAfterAnnotation();
   return annotations;
 }

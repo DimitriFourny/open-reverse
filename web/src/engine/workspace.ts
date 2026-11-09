@@ -4,7 +4,7 @@
 //   /workspace/meta/<id>.json            BinaryRecord               (always loaded)
 //   /workspace/meta/<id>.comments.json   { "<va>": "text" }         (always loaded)
 //   /workspace/meta/<id>.bookmarks.json  { "<va>": "description" }  (always loaded)
-//   /workspace/meta/<id>.data.json       WorkspaceData: data definitions and listing names
+//   /workspace/meta/<id>.data.json       WorkspaceData: data definitions, listing names, enum displays
 //   /workspace/binaries/<id>/<name>      the binary          (loaded on open)
 //   /workspace/binaries/<id>/debug/<n>   its companion debug file, if any (BinaryRecord.debug)
 //   /workspace/binaries/<id>/project/    OpenDecomp cache root (one project per binary, and
@@ -13,6 +13,7 @@
 
 import { sha256 } from '@noble/hashes/sha2.js';
 import type { DebugFileRecord } from './debugfile.ts';
+import type { EnumMember } from './enums.ts';
 import type { DataDef } from './linear.ts';
 import { vfs } from './vfs.ts';
 
@@ -32,6 +33,10 @@ export interface WorkspaceData {
   defs: Record<string, DataDef & { od?: boolean }>;
   /** Global names by address, as the listing's labels (OpenDecomp keeps its own `name` annotations). */
   names: Record<string, string>;
+  /** Constants displayed as an enumeration (M): `<0xinsn>|<hex value>` -> enum id (`lib:open_flags`, `user:Color`). */
+  enums?: Record<string, string>;
+  /** Enumerators of the enums declared in the type library (OpenDecomp stores an enum as its integer type). */
+  enumTypes?: Record<string, EnumMember[]>;
 }
 
 export function emptyData(): WorkspaceData {
@@ -271,7 +276,12 @@ export class Workspace {
 }
 
 export function isEmptyData(data: WorkspaceData): boolean {
-  return Object.keys(data.defs).length === 0 && Object.keys(data.names).length === 0;
+  return (
+    Object.keys(data.defs).length === 0 &&
+    Object.keys(data.names).length === 0 &&
+    Object.keys(data.enums ?? {}).length === 0 &&
+    Object.keys(data.enumTypes ?? {}).length === 0
+  );
 }
 
 /** SHA-256 of `bytes` as hex. `crypto.subtle` exists only in secure contexts (HTTPS or

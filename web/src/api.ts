@@ -1,5 +1,7 @@
 // Typed client for the OpenReverse server API (server/app.ts).
 
+import type { EnumDef } from './engine/enums.ts';
+
 export interface BinaryRecord {
   id: string;
   name: string;
@@ -198,6 +200,25 @@ export interface LibraryType {
   status: string;
   declaration: string;
 }
+
+/** A header record or typedef bundled for the binary's platform (Types view, Type libraries). */
+export interface BundledType {
+  name: string;
+  /** The record it denotes (`struct _IO_FILE` for `FILE`). */
+  record: string;
+  kind: 'struct' | 'union';
+  size: number | null;
+  header: string;
+}
+
+export interface BundledTypes {
+  abi: string;
+  /** Toolchain and header set the layouts were read from. */
+  source: string;
+  entries: BundledType[];
+}
+
+export type { EnumDef, EnumMember } from './engine/enums.ts';
 
 export interface TypesInfo {
   /** Merged recovered structure types, as C. */
@@ -464,6 +485,11 @@ export const api = {
   declareTypes: (bid: string, source: string) =>
     call<{ revision: number; declared: string[]; annotations: Record<string, string> }>('declareTypes', [bid, source]),
   removeLibraryTypes: (bid: string, annotationIds: string[]) => call<{ revision: number }>('removeLibraryTypes', [bid, annotationIds]),
+  bundledTypes: (bid: string) => call<BundledTypes>('bundledTypes', [bid]),
+  bundledTypeDeclaration: (bid: string, name: string) => call<{ text: string }>('bundledTypeDeclaration', [bid, name]),
+  enumCatalog: (bid: string) => call<{ enums: EnumDef[] }>('enumCatalog', [bid]),
+  enumDisplays: (bid: string) => call<{ enums: Record<string, string> }>('enumDisplays', [bid]),
+  setEnumDisplay: (bid: string, key: string, id: string | null) => call<{ enums: Record<string, string> }>('setEnumDisplay', [bid, key, id]),
   annotationSnapshot: (bid: string, fid: string) => call<{ snapshot: AnnotationSnapshot }>('annotationSnapshot', [bid, fid]),
   restoreAnnotations: (bid: string, fid: string, snapshot: AnnotationSnapshot) => call<{ revision: number }>('restoreAnnotations', [bid, fid, snapshot]),
   prototype: (bid: string, fid: string) => call<{ text: string; declared: boolean }>('prototype', [bid, fid]),

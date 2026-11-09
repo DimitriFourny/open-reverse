@@ -11,8 +11,9 @@
 //   comments.json         { "<0xaddr>": "text" } user comments
 //   bookmarks.json        (version 2) { "<0xaddr>": "description" } bookmarks
 //   data.json             (version 2) { "defs": { "<0xaddr>": { "type", "count", "od"? } },
-//                         "names": { "<0xaddr>": "name" } }: data definitions and listing
-//                         names
+//                         "names": { "<0xaddr>": "name" }, "enums"?: { "<0xinsn>|<hex>": "lib:set" },
+//                         "enumTypes"?: { "Name": [{ "name", "value" }] } }: data definitions,
+//                         listing names, constants displayed as enums and declared enumerators
 //
 // Both version 2 entries are optional and written only when there is something to
 // write; an archive with neither says version 1, so older readers still open it.
@@ -230,6 +231,27 @@ function validateData(value: unknown): WorkspaceData {
     if (!ADDR_RE.test(k) || typeof n !== 'string' || !/^[A-Za-z_][A-Za-z0-9_:$.@]{0,1023}$/.test(n))
       throw new ArchiveError(`Invalid name at ${JSON.stringify(k.slice(0, 40))}`);
     out.names[k] = n;
+  }
+  // Enum displays (M) and declared enumerators: optional, ignored by older readers.
+  const enums = v.enums ?? {};
+  const enumTypes = v.enumTypes ?? {};
+  if (typeof enums !== 'object' || Array.isArray(enums) || typeof enumTypes !== 'object' || Array.isArray(enumTypes))
+    throw new ArchiveError('Invalid data.json');
+  if (Object.keys(enums).length + Object.keys(enumTypes).length > MAX_COMMENTS) throw new ArchiveError('Too many enum displays');
+  for (const [k, id] of Object.entries(enums as Record<string, unknown>)) {
+    if (!/^0x[0-9a-f]{1,16}\|-?[0-9a-f]{1,16}$/.test(k) || typeof id !== 'string' || !/^(?:lib|user):[A-Za-z_]\w{0,255}$/.test(id))
+      throw new ArchiveError(`Invalid enum display ${JSON.stringify(k.slice(0, 40))}`);
+    (out.enums ??= {})[k] = id;
+  }
+  for (const [name, members] of Object.entries(enumTypes as Record<string, unknown>)) {
+    if (!/^[A-Za-z_]\w{0,255}$/.test(name) || !Array.isArray(members) || members.length > 4096)
+      throw new ArchiveError(`Invalid enum ${JSON.stringify(name.slice(0, 40))}`);
+    const list = members.map((m: { name?: unknown; value?: unknown } | null) => {
+      if (!m || typeof m.name !== 'string' || !/^[A-Za-z_]\w{0,255}$/.test(m.name) || typeof m.value !== 'string' || !/^-?[0-9a-f]{1,16}$/.test(m.value))
+        throw new ArchiveError(`Invalid enumerator in ${name}`);
+      return { name: m.name, value: m.value };
+    });
+    (out.enumTypes ??= {})[name] = list;
   }
   return out;
 }

@@ -32,6 +32,8 @@ const ELFDBG = fileURLToPath(new URL('../../vendor/open-decomp/test/metadata/deb
 const PEDBG = fileURLToPath(new URL('../../vendor/open-decomp/test/metadata/debug/fixtures/pe/', import.meta.url));
 // OpenDecomp's Objective-C test inputs (test/metadata/fixtures/objc-foundation.m, built with objc_msgSend + __objc_selrefs).
 const OBJC = fileURLToPath(new URL('../../vendor/open-decomp/test/metadata/fixtures/objc-foundation-classic', import.meta.url));
+// OpenDecomp's library-type fixtures (libcalls.c: stripped gcc ELF calling glibc through lazy PLT stubs).
+const LIBTYPES = fileURLToPath(new URL('../../vendor/open-decomp/test/metadata/library-types/fixtures/', import.meta.url));
 const URL_ = process.env.OPEN_REVERSE_URL ?? 'http://localhost:5199/';
 const STRIPPED = process.env.STRIPPED_BINARY ?? '/bin/ls';
 const SSHPASS = process.env.SSHPASS_BINARY ?? '/tmp/sshpass';
@@ -1146,6 +1148,52 @@ return (await or.xrefsTo(s.addr)).length`);
     await page.waitForSelector('.sig-table tr:has-text("sigfix")', { state: 'detached' });
     await page.keyboard.press('Escape');
     await page.waitForSelector('.side-item.library:has-text("sig_dup")', { timeout: 60000 });
+  });
+
+  await step('library types: PLT calls get header records and constant names; M shows a constant as an enum (undo); type libraries browse and import (Shift+F11)', async () => {
+    await page.locator('.brand').click();
+    await page.setInputFiles('input[type=file]', LIBTYPES + 'libcalls-stripped');
+    await page.waitForSelector('.row.insn', { timeout: 120000 });
+    const at = async (addr, text) => {
+      await page.keyboard.press('g');
+      await page.fill('.modal-input', addr);
+      await page.keyboard.press('Enter');
+      await page.waitForSelector(`.pane-pseudo .pline:has-text(${JSON.stringify(text)})`, { timeout: 180000 });
+    };
+    // write_file: open's flags and mode, through a lazy-binding PLT stub.
+    await at('0x126b', 'O_WRONLY | O_CREAT | O_TRUNC, 0644');
+    await at('0x12b6', 'PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS');
+    // count_entries: struct dirent members.
+    await at('0x135e', 'entry->d_type');
+    // M on the `8` compared with d_type: no bundled set of a dirent type, so a declared enum.
+    await page.locator('.seg button', { hasText: 'Types' }).click();
+    await page.fill('.types-input', 'enum FileType { FT_UNKNOWN = 0, FT_DIR = 4, FT_REG = 8, FT_LNK = 10 };');
+    await page.keyboard.press('Control+Enter');
+    await page.waitForSelector('.toast:has-text("Declared")', { timeout: 120000 });
+    await page.locator('.seg button', { hasText: 'Linear' }).click();
+    await page.waitForSelector('.pane-pseudo .pline:has-text("entry->d_type")', { timeout: 180000 });
+    await page.locator('.pane-pseudo .pline:has-text("entry->d_type") .tok.t-num', { hasText: /^8$/ }).click();
+    await page.keyboard.press('m');
+    await page.waitForSelector('.enum-item:has-text("FileType")', { timeout: 60000 });
+    await page.fill('.modal-input', 'FileType');
+    await page.keyboard.press('Enter');
+    await page.waitForSelector('.pane-pseudo .tok.t-enum:has-text("FT_REG")', { timeout: 60000 });
+    await page.waitForSelector('.row.insn .t-enum:has-text("FT_REG")');
+    await page.keyboard.press('Control+z');
+    await page.waitForSelector('.pane-pseudo .tok.t-enum', { state: 'detached', timeout: 60000 });
+    await page.keyboard.press('Control+Shift+z');
+    await page.waitForSelector('.pane-pseudo .tok.t-enum:has-text("FT_REG")', { timeout: 60000 });
+    // Shift+F11: the bundled glibc types; import struct timespec into the type library.
+    await page.keyboard.press('Shift+F11');
+    await page.waitForSelector('.bundled-search:focus', { timeout: 60000 });
+    await page.keyboard.type('timespec');
+    await page.locator('.bundled-row', { hasText: 'struct timespec' }).first().click();
+    await page.waitForSelector('.bundled-code:has-text("tv_nsec")');
+    await page.locator('.bundled-row', { hasText: 'struct timespec' }).first().locator('button', { hasText: 'import' }).click();
+    await page.waitForSelector('.lib-type:has-text("struct timespec")', { timeout: 120000 });
+    await page.waitForSelector('.bundled-row:has-text("struct timespec") .bundled-in');
+    await page.keyboard.press('Control+z');
+    await page.waitForSelector('.lib-type:has-text("struct timespec")', { state: 'detached', timeout: 120000 });
   });
 
   console.log('console errors:', errors.length ? errors : 'none');

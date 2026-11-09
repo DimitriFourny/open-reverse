@@ -149,6 +149,19 @@ describe('project archive', () => {
       await assert.rejects(decodeProjectArchive(await mutate(v2, (es) => (es.find((e) => e.path === 'data.json')!.data = enc.encode(bad)))), ArchiveError, bad);
   });
 
+  test('enum displays and declared enumerators travel in data.json', async () => {
+    const data = {
+      defs: {},
+      names: {},
+      enums: { '0x401005|241': 'lib:open_flags', '0x401010|2': 'user:Color' },
+      enumTypes: { Color: [{ name: 'RED', value: '1' }, { name: 'NONE', value: '-1' }] },
+    };
+    const bytes = await encodeProjectArchive({ ...sample(), data });
+    assert.deepEqual((await decodeProjectArchive(bytes)).data, data);
+    for (const bad of ['{"enums":{"0x1":"lib:x"}}', '{"enums":{"0x1|2":"x"}}', '{"enumTypes":{"A":[{"name":"a b","value":"1"}]}}', '{"enumTypes":{"A":[{"name":"a","value":"0x1"}]}}'])
+      await assert.rejects(decodeProjectArchive(await mutate(bytes, (es) => (es.find((e) => e.path === 'data.json')!.data = enc.encode(bad)))), ArchiveError, bad);
+  });
+
   test('bookmarks: version 2 with bookmarks.json, version 1 without', async () => {
     const version = async (bytes: Uint8Array) =>
       JSON.parse(new TextDecoder().decode((await zipDecode(bytes)).find((e) => e.path === ARCHIVE_MANIFEST)!.data)).version;
