@@ -526,7 +526,7 @@ function SourceLine() {
   if (!source || source.addr !== addr) return null;
   return (
     <span className="dim status-source" title={`${source.file}:${source.line} (debug line table)`}>
-      {source.file.split('/').pop()}:{source.line}
+      {source.file.split(/[\\/]/).pop()}:{source.line}
     </span>
   );
 }

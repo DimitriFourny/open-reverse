@@ -24,9 +24,11 @@ export interface DebugFileRecord {
 export interface DebugSummary {
   source: 'none' | 'embedded' | 'companion';
   status: 'absent' | 'complete' | 'partial';
-  matched_by: 'uuid' | 'build-id' | 'debuglink' | null;
+  matched_by: 'uuid' | 'build-id' | 'debuglink' | 'guid-age' | null;
   uuid: string | null;
   build_id: string | null;
+  /** The matched PDB's identity (a PE image's RSDS record). Absent from older engines. */
+  pdb?: { guid: string; age: number } | null;
   companion_sha256: string | null;
   functions: number;
   types: number;

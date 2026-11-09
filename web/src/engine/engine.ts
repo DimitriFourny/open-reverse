@@ -148,9 +148,10 @@ export class Engine {
 
   /**
    * Adds (or replaces) the binary's companion debug file: the DWARF file of a dSYM (or a
-   * zipped .dSYM bundle), or an ELF debug file. The binary reopens paired with it, in an
-   * OpenDecomp project of its own; when OpenDecomp does not match it to the binary
-   * (UUID, build ID, debuglink CRC), the previous state is restored and the error says why.
+   * zipped .dSYM bundle), an ELF debug file or a PDB. The binary reopens paired with it, in
+   * an OpenDecomp project of its own; when OpenDecomp does not match it to the binary
+   * (UUID, build ID, debuglink CRC, PDB GUID and age), the previous state is restored and
+   * the error says why.
    */
   async addDebugFile(bid: string, name: string, bytes: Uint8Array): Promise<{ record: BinaryRecord }> {
     const record = this.workspace.get(bid);

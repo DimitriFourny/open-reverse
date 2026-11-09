@@ -28,6 +28,8 @@ mkdirSync(TMP, { recursive: true });
 const FIX = fileURLToPath(new URL('../../vendor/open-decomp/fixtures/bin/', import.meta.url));
 // OpenDecomp's ELF debug-info fixtures (shapes.c: stripped image + objcopy --only-keep-debug file).
 const ELFDBG = fileURLToPath(new URL('../../vendor/open-decomp/test/metadata/debug/fixtures/elf/', import.meta.url));
+// OpenDecomp's PE/PDB fixtures (shapes.c built with clang and lld-link, freestanding Windows x64).
+const PEDBG = fileURLToPath(new URL('../../vendor/open-decomp/test/metadata/debug/fixtures/pe/', import.meta.url));
 // OpenDecomp's Objective-C test inputs (test/metadata/fixtures/objc-foundation.m, built with objc_msgSend + __objc_selrefs).
 const OBJC = fileURLToPath(new URL('../../vendor/open-decomp/test/metadata/fixtures/objc-foundation-classic', import.meta.url));
 const URL_ = process.env.OPEN_REVERSE_URL ?? 'http://localhost:5199/';
@@ -1042,6 +1044,25 @@ return (await or.xrefsTo(s.addr)).length`);
     await page.locator('.debug-badge').click();
     await page.locator('.debug-dialog button', { hasText: 'Remove debug file' }).click();
     await page.waitForSelector('.debug-badge:has-text("+ debug")', { timeout: 120000 });
+  });
+  await step('debug file: a PE dropped with its PDB gets names, prototypes, locals and source lines; another build is refused; the archive keeps it', async () => {
+    await page.locator('.brand').click();
+    await page.setInputFiles('input[type=file]', [PEDBG + 'shapes-O0.exe', PEDBG + 'shapes-O0.pdb']);
+    await page.waitForSelector('.debug-badge.loaded:has-text("PDB ✓")', { timeout: 120000 });
+    await page.locator('.side-item', { hasText: 'registry_visit' }).click();
+    await page.waitForSelector('.pline:has-text("int32_t registry_visit(registry* reg, void* cookie)")', { timeout: 120000 });
+    await page.waitForSelector('.pline:has-text("uint32_t visited;")');
+    await page.waitForSelector('.status-source:has-text("shapes.c:")', { timeout: 60000 });
+    await page.locator('.debug-badge').click();
+    await page.waitForSelector('.debug-status:has-text("matched by PDB GUID and age")');
+    await page.waitForSelector('.debug-dialog td:has-text("age 1")');
+    await page.setInputFiles('[data-testid=debug-file-input]', PEDBG + 'shapes-O2.pdb');
+    await page.waitForSelector('.toast-error:has-text("is not the debug file of shapes-O0.exe")', { timeout: 120000 });
+    await page.waitForSelector('.debug-badge.loaded:has-text("PDB ✓")', { timeout: 120000 });
+    const { bytes } = await download(page, () => exportItem('export-archive'));
+    const archive = await decodeProjectArchive(bytes);
+    if (archive.record.debug?.kind !== 'pdb' || Buffer.compare(Buffer.from(archive.debug), readFileSync(PEDBG + 'shapes-O0.pdb')) !== 0)
+      throw new Error('PDB missing from the archive');
   });
 
   // Library signatures (Shift+F5). zdemo-stripped: zlib linked statically into a stripped program
