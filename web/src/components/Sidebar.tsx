@@ -84,8 +84,8 @@ export function Sidebar() {
         primary: fn.name,
         secondary: sort === 'size' ? String(fn.size) : padAddr(fn.entry),
         addr: fn.entry,
-        cls: fn.importStub ? 'stub' : fn.renamed ? 'renamed' : fn.originalName ? '' : 'unnamed',
-        title: `${fn.name} @ ${fn.entry} · ${fn.size} bytes · ${fn.boundary}${fn.importStub ? ' · import stub' : ''}${fn.renamed ? ` · originally ${fn.originalName ?? 'unnamed'}` : mangledNote(fn.mangled)}`,
+        cls: fn.importStub ? 'stub' : fn.renamed ? 'renamed' : fn.library ? 'library' : fn.originalName ? '' : 'unnamed',
+        title: `${fn.name} @ ${fn.entry} · ${fn.size} bytes · ${fn.boundary}${fn.importStub ? ' · import stub' : ''}${fn.library ? ` · library function (signatures ${fn.library})` : ''}${fn.renamed ? ` · originally ${fn.originalName ?? 'unnamed'}` : mangledNote(fn.mangled)}`,
         onOpen: () => void navigate(fn.entry, { fnId: fn.id }),
         onXrefs: () => void showXrefs({ id: fn.id }, fn.name),
       }));

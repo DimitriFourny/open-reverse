@@ -304,7 +304,7 @@ export async function runSearch(source: SearchSource, query: SearchQuery, ctx: T
 // ------------------------------------------------------------ navigation map
 
 /** What a stretch of the image is, by priority of display. */
-export const NAV_KINDS = ['unexplored', 'data', 'code', 'import', 'string'] as const;
+export const NAV_KINDS = ['unexplored', 'data', 'code', 'import', 'string', 'library'] as const;
 export type NavKind = (typeof NAV_KINDS)[number];
 
 export interface NavRegion {

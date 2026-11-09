@@ -15,7 +15,8 @@
     "preview": "vite preview --config web/vite.config.ts",
     "typecheck": "tsc --noEmit -p web/tsconfig.json && tsc --noEmit -p tsconfig.json",
     "test": "node --test test/*.test.ts",
-    "test:e2e": "node test/e2e/browser.mjs"
+    "test:e2e": "node test/e2e/browser.mjs",
+    "signatures": "node scripts/signatures.ts"
   },
   "devDependencies": {
     "@dagrejs/dagre": "1.1.5",

@@ -17,6 +17,7 @@ import {
 } from '../store.ts';
 import { DebugInfoDialog } from './DebugInfo.tsx';
 import { DiffPicker } from './DiffView.tsx';
+import { SignaturesDialog } from './Signatures.tsx';
 import { cmpAddr, functionOffset, mangledNote, padAddr, parseAddress } from '../util.ts';
 
 function Modal({ title, children, onClose }: { title: string; children: React.ReactNode; onClose: () => void }) {
@@ -368,6 +369,7 @@ export function Dialogs() {
   if (dialog.kind === 'bookmarks') return <BookmarksDialog />;
   if (dialog.kind === 'diffWith') return <DiffPicker />;
   if (dialog.kind === 'debugInfo') return <DebugInfoDialog onClose={close} />;
+  if (dialog.kind === 'signatures') return <SignaturesDialog onClose={close} />;
   return null;
 }
 

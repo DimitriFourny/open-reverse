@@ -42,6 +42,8 @@ import { buildNavMap, runSearch, SearchError, type NavKind, type NavMap, type Re
 import type { TaskContext } from './tasks.ts';
 import { functionSignature, type FunctionSig } from './bindiff.ts';
 import type { BinaryRecord, Workspace } from './workspace.ts';
+import { matchSignatures, type MatchTarget, type SignatureLibrary, type SignatureSource } from '@od/metadata/library-signatures/index.js';
+import { linkedSource } from './signatures.ts';
 import { SUPPORTED_DEBUG_KINDS } from './debugfile.ts';
 
 /** The largest budget OpenDecomp accepts: discovery of a real binary needs it. */
@@ -100,6 +102,8 @@ export interface FunctionSummary {
   boundary: string;
   analysis: string;
   importStub: boolean;
+  /** Named by a library signature match: the signature library's id. */
+  library: string | null;
 }
 
 export type { Instruction };
@@ -473,23 +477,26 @@ export class AnalysisSession {
       for (const fn of data.items) {
         const entry = canon(fn.entry.value);
         const size = fn.ranges.reduce((n, r) => n + Number(BigInt(r.size)), 0);
-        // OpenDecomp shows a mangled name demangled: that is not a rename.
-        const demangled = fn.original_name ? await this.#demangled(fn.original_name) : null;
+        // OpenDecomp shows a mangled name demangled: that is not a rename. Nor is a library match.
+        const match = (fn as { library_match?: { library: string; name: string } }).library_match;
+        const linkage = match?.name ?? fn.original_name;
+        const demangled = linkage ? await this.#demangled(linkage) : null;
         ranges.set(
           fn.id,
           fn.ranges.map((r) => [BigInt(r.start.value), BigInt(r.start.value) + BigInt(r.size)]),
         );
         list.push({
           id: fn.id,
-          name: fn.display_name ?? demangled ?? fn.original_name ?? `sub_${entry.slice(2)}`,
+          name: (match ? demangled : null) ?? fn.display_name ?? demangled ?? fn.original_name ?? `sub_${entry.slice(2)}`,
           originalName: fn.original_name,
-          mangled: demangled ? fn.original_name : null,
-          renamed: fn.display_name !== null && fn.display_name !== fn.original_name && fn.display_name !== demangled,
+          mangled: demangled ? linkage : null,
+          renamed: !match && fn.display_name !== null && fn.display_name !== fn.original_name && fn.display_name !== demangled,
           entry,
           size,
           boundary: fn.boundary,
           analysis: fn.analysis,
           importStub: (fn as { kind?: string }).kind === 'import_stub',
+          library: match?.library ?? null,
         });
       }
       indexState = data.page.index_state;
@@ -1595,6 +1602,132 @@ export class AnalysisSession {
     return out;
   }
 
+  // ------------------------------------------------------- library signatures
+
+  /** The image as the signature matcher reads it: the indexed functions (a generated name is
+   * none), the bytes of the executable sections, and the ELF IRELATIVE slots. */
+  async #signatureTarget(): Promise<MatchTarget> {
+    const index = await this.functions();
+    const chunks: { start: bigint; bytes: Uint8Array }[] = [];
+    for (const r of await this.regions()) {
+      if (!r.exec || !r.fileSize) continue;
+      const bytes = new Uint8Array(r.fileSize);
+      for (let off = 0; off < r.fileSize; off += 65536)
+        for (const run of await this.readBytes(r.start + BigInt(off), Math.min(65536, r.fileSize - off)))
+          bytes.set(run.bytes.subarray(0, r.fileSize - Number(run.start - r.start)), Number(run.start - r.start));
+      chunks.push({ start: r.start, bytes });
+    }
+    const resolvers = new Map<bigint, bigint>();
+    type Row = { address: { space: string; value: string }; encoding: string; addend: { negative: boolean; magnitude: string } };
+    if (this.binary.image.target.format === 'elf')
+      for (const row of (await this.#binaryInfoList('relocations').catch(() => [])) as Row[])
+        if (row.encoding === 'R_X86_64_IRELATIVE' && row.address.space === 'va' && !row.addend.negative)
+          resolvers.set(BigInt(row.address.value), BigInt(row.addend.magnitude));
+    const target = this.binary.image.target;
+    return {
+      architecture: target.architecture === 'arm64' ? 'arm64' : 'x86_64',
+      format: target.format,
+      read: (address, length) => {
+        const chunk = chunks.find((c) => address >= c.start && address < c.start + BigInt(c.bytes.length));
+        if (!chunk) return new Uint8Array(0);
+        const at = Number(address - chunk.start);
+        return chunk.bytes.subarray(at, Math.min(chunk.bytes.length, at + length));
+      },
+      functions: index.list
+        .filter((f) => !f.importStub || f.originalName)
+        .map((f) => ({ id: f.id, entry: BigInt(f.entry), name: f.renamed || f.originalName || f.library ? (f.originalName ?? f.mangled ?? f.name) : null })),
+      resolvers,
+    };
+  }
+
+  /**
+   * Match signature libraries against the image and name what they find with `library_match`
+   * annotations (its provenance: the library and the declaration it implements). Only functions
+   * without a name are named; the returned edits put the names back after an undo.
+   */
+  async applySignatures(libraries: SignatureLibrary[]) {
+    const started = Date.now();
+    const target = await this.#signatureTarget();
+    const report = matchSignatures(libraries, target);
+    const edits = report.matches.map((m) => ({
+      operation: 'set',
+      id: annotationId(`library-match:${m.function_id}`),
+      entity_id: m.function_id,
+      value: { kind: 'library_match', library: m.library, name: m.name, contract: m.contract },
+      status: 'asserted',
+      evidence_ids: [],
+    }));
+    const revision = await this.restoreSignatureEdits(edits);
+    return {
+      revision,
+      edits,
+      matched: Object.fromEntries(report.libraries.map((l) => [l.id, l.matched])),
+      stubs: report.matches.filter((m) => m.kind === 'ifunc_stub').length,
+      ambiguous: report.ambiguous.map((a) => ({ entry: canon(`0x${a.entry.toString(16)}`), candidates: a.candidates.map((c) => c.name) })),
+      unnamed: target.functions.filter((f) => f.name === null).length,
+      ms: Date.now() - started,
+    };
+  }
+
+  /** Apply `library_match` edits (in batches: one revision each). */
+  async restoreSignatureEdits(edits: unknown[]): Promise<number> {
+    return this.#writes.run(async () => {
+      for (let i = 0; i < edits.length; i += 1000) await this.#apply(edits.slice(i, i + 1000));
+      return this.binary.revision;
+    });
+  }
+
+  /** Remove annotations by id (undo of a signature application). */
+  async removeAnnotations(ids: string[]): Promise<number> {
+    return this.#writes.run(async () => {
+      for (let i = 0; i < ids.length; i += 1000) await this.#apply(ids.slice(i, i + 1000).map((id) => ({ operation: 'remove', id })));
+      return this.binary.revision;
+    });
+  }
+
+  /** Signature sources of the functions that have a name of their own (symbols, renames),
+   * import stubs and library matches left out: a signature library of this build. */
+  async linkedSignatureSources(ctx: TaskContext): Promise<SignatureSource[]> {
+    const index = await this.functions();
+    const named = index.list.filter((f) => !f.importStub && !f.library && (f.originalName || f.renamed));
+    const architecture = this.binary.image.target.architecture === 'arm64' ? 'arm64' : 'x86_64';
+    const nameAt = (addr: bigint) => {
+      const f = index.byEntry.get(canon(`0x${addr.toString(16)}`));
+      return f && (f.originalName || f.renamed || f.library) ? (f.mangled ?? f.originalName ?? f.name) : null;
+    };
+    const out: SignatureSource[] = [];
+    for (const [n, fn] of named.entries()) {
+      ctx.signal.throwIfAborted();
+      ctx.progress({ phase: 'functions', done: n, total: named.length, detail: fn.name });
+      const range = index.ranges.get(fn.id)?.find(([start]) => start === BigInt(fn.entry));
+      if (!range) continue;
+      const core = await this.#buildListing(fn.id, false).catch(() => null);
+      if (!core) continue;
+      const bytes = await this.#read(range[0], Number(range[1] - range[0]));
+      out.push(
+        linkedSource(
+          {
+            names: [fn.mangled ?? fn.originalName ?? fn.name],
+            entry: range[0],
+            bytes,
+            instructions: core.instructions.map((insn) => ({
+              addr: BigInt(insn.addr),
+              size: insn.size,
+              mnemonic: insn.mnemonic,
+              operands: insn.operands,
+              flow: insn.flow,
+              refs: [...insn.refs.map((r) => r.addr), ...(insn.resolved ?? []).map((r) => r.addr)].filter(Boolean),
+            })),
+          },
+          architecture,
+          nameAt,
+        ),
+      );
+    }
+    ctx.progress({ phase: 'functions', done: named.length, total: named.length });
+    return out;
+  }
+
   /** Per-function instruction text for the immediate search, at one revision (capped). */
   #insnText: { revision: number; byFunction: Map<string, { addr: string; mnemonic: string; operands: string }[]>; units: number } | null = null;
 
@@ -1669,7 +1802,7 @@ export class AnalysisSession {
       for (const [addr, def] of Object.entries(data.defs)) items.push({ start: BigInt(addr), size: defSize(def), kind: def.type === 'string' ? 'string' : 'data' });
       for (const [addr, s] of strings) items.push({ start: BigInt(addr), size: s.length + (s.terminated ? 1 : 0), kind: 'string' });
       for (const f of index.list)
-        for (const [start, end] of index.ranges.get(f.id) ?? []) items.push({ start, size: Number(end - start), kind: f.importStub ? 'import' : 'code' });
+        for (const [start, end] of index.ranges.get(f.id) ?? []) items.push({ start, size: Number(end - start), kind: f.importStub ? 'import' : f.library ? 'library' : 'code' });
       return buildNavMap(regions, items);
     })();
     this.#navMap = { revision, value };

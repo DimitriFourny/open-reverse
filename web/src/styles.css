@@ -319,6 +319,9 @@ select:focus {
 .side-item.renamed .side-primary {
   color: var(--fn);
 }
+.side-item.library .side-primary {
+  color: #3fc6d4;
+}
 .side-item.stub .side-primary {
   color: #9aa7c7;
   font-style: italic;
@@ -1747,4 +1750,95 @@ select:focus {
 .recent-debug {
   font-size: 11px;
   color: var(--fn);
+}
+
+/* --------------------------------------------------------------- signatures */
+.modal.signatures-dialog {
+  width: min(860px, calc(100vw - 32px));
+}
+.sig-intro {
+  font-size: 12px;
+  margin: 0 0 8px;
+}
+.sig-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+.sig-table th {
+  text-align: left;
+  color: var(--fg-dim);
+  font-weight: normal;
+  border-bottom: 1px solid var(--border);
+  padding: 3px 6px;
+}
+.sig-table td {
+  padding: 3px 6px;
+  border-bottom: 1px solid var(--bg-3);
+}
+.sig-table .num {
+  text-align: right;
+  white-space: nowrap;
+}
+.sig-table .mono {
+  font-family: var(--mono);
+  font-size: 11px;
+}
+.sig-title {
+  color: #3fc6d4;
+}
+.sig-badge {
+  margin-left: 6px;
+  font-size: 10px;
+  padding: 0 5px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  color: var(--fg-dim);
+}
+.sig-badge.suggested {
+  color: var(--fn);
+  border-color: #2f5a42;
+}
+.sig-result {
+  margin-top: 8px;
+  font-size: 12px;
+}
+.sig-ambiguous {
+  max-height: 140px;
+  overflow: auto;
+  margin-top: 4px;
+  font-family: var(--mono);
+  font-size: 11px;
+}
+.sig-ambiguous-row {
+  cursor: pointer;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.sig-ambiguous-row:hover {
+  background: var(--bg-hover);
+}
+.sig-ambiguous-row .addr {
+  color: var(--addr);
+  margin-right: 6px;
+}
+.sig-error {
+  margin-top: 6px;
+  color: var(--error);
+  font-size: 12px;
+}
+.sig-make {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  margin-top: 10px;
+  font-size: 12px;
+}
+.sig-make .modal-input {
+  flex: 1;
+  margin: 0;
+}
+.modal.signatures-dialog:focus {
+  outline: none;
 }

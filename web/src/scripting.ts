@@ -236,6 +236,8 @@ export interface ScriptFunction {
   mangled: string | null;
   renamed: boolean;
   importStub: boolean;
+  /** Named by a library signature match: the signature library's id. */
+  library: string | null;
 }
 
 const fnView = (f: FunctionSummary): ScriptFunction => ({
@@ -246,6 +248,7 @@ const fnView = (f: FunctionSummary): ScriptFunction => ({
   mangled: f.mangled,
   renamed: f.renamed,
   importStub: f.importStub,
+  library: f.library,
 });
 
 /** Symbols per binary, for names that are no function (the API looks names up in them). */
@@ -463,7 +466,7 @@ export const HELP = `OpenReverse script API — every call is async: use await. 
 
 read
   or.info()                    binary name, format, architecture, entry points
-  or.functions()               [{ name, entry, size, originalName, mangled, renamed, importStub }]
+  or.functions()               [{ name, entry, size, originalName, mangled, renamed, importStub, library }]
   or.func(target)              one function (by name, entry or an address inside it), or null
   or.strings() / or.symbols() / or.sections()
   or.xrefsTo(target)           references to a function, string or address: [{ from, fromFunction, kind, ... }]

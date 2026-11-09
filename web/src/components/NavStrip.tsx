@@ -14,6 +14,7 @@ const COLORS: Record<(typeof NAV_KINDS)[number], string> = {
   code: '#3f86d8',
   import: '#c792ea',
   string: '#d99a4e',
+  library: '#3fc6d4',
 };
 const LABELS: Record<(typeof NAV_KINDS)[number], string> = {
   unexplored: 'unexplored code',
@@ -21,6 +22,7 @@ const LABELS: Record<(typeof NAV_KINDS)[number], string> = {
   code: 'function',
   import: 'import stub',
   string: 'string',
+  library: 'library function (signature match)',
 };
 
 const HIDE_KEY = 'open-reverse.navstrip';

@@ -88,6 +88,8 @@ function useKeyboard() {
       else if (e.altKey && !e.ctrlKey && !e.metaKey && e.code === 'KeyI') openSearch('immediate');
       // IDA's script snippets (Shift+F2): the JavaScript console.
       else if (k === 'F2' && e.shiftKey && plain) toggleConsole();
+      // IDA's signatures window (Shift+F5): library signatures.
+      else if (k === 'F5' && e.shiftKey && plain) setState({ dialog: { kind: 'signatures' } });
       else if ((e.ctrlKey || e.metaKey) && (k === 'p' || k === 'k')) {
         e.preventDefault();
         setState({ dialog: { kind: 'goto' } });
@@ -394,6 +396,9 @@ function TopBar({ showNav, onToggleNav }: { showNav?: boolean; onToggleNav?: () 
         <button onClick={() => setState({ dialog: { kind: 'goto' } })} title="Go to (G, Ctrl+P)">Go to…</button>
         <button onClick={() => openSearch()} title="Search bytes (Alt+B), text (Alt+T) or an immediate value (Alt+I)">Search…</button>
         <button onClick={toggleConsole} title="JavaScript console with the `or` scripting API (Shift+F2)">Script</button>
+        <button onClick={() => setState({ dialog: { kind: 'signatures' } })} title="Library signatures: name library functions of stripped / static binaries (Shift+F5)">
+          Signatures
+        </button>
         <DiffButton />
       </div>
       <div className="seg">
@@ -493,7 +498,7 @@ function StatusBar() {
       )}
       {showToast && <span className={`toast toast-${toast.kind}`}>{toast.text}</span>}
       <span className="spacer" />
-      <span className="dim keys">G go · ↑↓ move · Enter follow · Ctrl+F find · N rename · Y type/signature · S create struct · X xrefs · Shift+X xrefs from · ; comment · D A O * U data · Alt+B/T/I search · Ctrl+Z undo · Alt+M mark · Ctrl+M marks · Shift+F2 script · Space graph · Tab pseudo · H hex · B bytes · Esc back</span>
+      <span className="dim keys">G go · ↑↓ move · Enter follow · Ctrl+F find · N rename · Y type/signature · S create struct · X xrefs · Shift+X xrefs from · ; comment · D A O * U data · Alt+B/T/I search · Ctrl+Z undo · Alt+M mark · Ctrl+M marks · Shift+F2 script · Shift+F5 signatures · Space graph · Tab pseudo · H hex · B bytes · Esc back</span>
     </div>
   );
 }
