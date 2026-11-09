@@ -158,18 +158,20 @@ export class Engine {
       if (e instanceof DebugFileError) throw new ApiError(400, e.message);
       throw e;
     }
-    await this.#closeSession(bid);
-    await this.workspace.load(bid);
-    const previousPath = this.workspace.debugPath(record);
-    const previous = record.debug && previousPath ? { ...record.debug, bytes: vfs.read(previousPath).slice() } : null;
-    const updated = await this.workspace.setDebugFile(bid, file.name, file.bytes, file.kind);
+    const swap = await this.#exclusive(bid, async () => {
+      const previousPath = this.workspace.debugPath(record);
+      const previous = record.debug && previousPath ? { ...record.debug, bytes: vfs.read(previousPath).slice() } : null;
+      return { previous, updated: await this.workspace.setDebugFile(bid, file.name, file.bytes, file.kind) };
+    });
+    const { previous, updated } = swap;
     try {
       await this.#session(bid); // OpenDecomp imports the pair, matching the debug file first
     } catch (e) {
-      await this.#closeSession(bid);
-      if (previous) await this.workspace.setDebugFile(bid, previous.name, previous.bytes, previous.kind);
-      else await this.workspace.removeDebugFile(bid);
-      await this.workspace.removeDebugProject(bid, updated.debug!.sha256);
+      await this.#exclusive(bid, async () => {
+        if (previous) await this.workspace.setDebugFile(bid, previous.name, previous.bytes, previous.kind);
+        else await this.workspace.removeDebugFile(bid);
+        await this.workspace.removeDebugProject(bid, updated.debug!.sha256);
+      });
       throw new ApiError(400, `${file.name} is not the debug file of ${record.name}: ${e instanceof Error ? e.message : String(e)}`);
     }
     if (previous && previous.sha256 !== updated.debug!.sha256) await this.workspace.removeDebugProject(bid, previous.sha256);
@@ -179,9 +181,30 @@ export class Engine {
   /** Forgets the binary's debug file (and its paired project); the binary reopens without it. */
   async removeDebugFile(bid: string): Promise<{ record: BinaryRecord }> {
     if (!this.workspace.get(bid)) throw new ApiError(404, `Unknown binary ${bid}`);
-    await this.#closeSession(bid);
-    await this.workspace.load(bid);
-    return { record: await this.workspace.removeDebugFile(bid) };
+    return { record: await this.#exclusive(bid, () => this.workspace.removeDebugFile(bid)) };
+  }
+
+  /**
+   * Runs `fn` with the binary's session closed and its files loaded, while no session can
+   * open: a call that needs the binary meanwhile (the UI polling it) waits and then opens it
+   * from the record `fn` left, never from the one it replaces.
+   */
+  async #exclusive<T>(bid: string, fn: () => Promise<T>): Promise<T> {
+    const previous = this.#closing.get(bid);
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => (release = resolve));
+    this.#closing.set(bid, gate);
+    try {
+      await previous;
+      const session = this.#sessions.get(bid);
+      this.#sessions.delete(bid);
+      await (await session?.catch(() => null))?.close();
+      await this.workspace.load(bid);
+      return await fn();
+    } finally {
+      release();
+      if (this.#closing.get(bid) === gate) this.#closing.delete(bid);
+    }
   }
 
   /** The raw bytes of a stored binary (download). */
