@@ -1015,10 +1015,13 @@ return (await or.xrefsTo(s.addr)).length`);
     await page.locator('.brand').click();
     await page.setInputFiles('input[type=file]', FIX + 'macho-arm64-stripped');
     await page.waitForSelector('.debug-badge:has-text("+ debug")', { timeout: 120000 });
+    await page.waitForSelector('.row.insn', { timeout: 120000 });
     await page.locator('.debug-badge').click();
     await page.waitForSelector('.debug-dialog');
     await page.setInputFiles('[data-testid=debug-file-input]', zipPath);
-    await page.waitForSelector('.debug-badge.loaded:has-text("dSYM")', { timeout: 120000 });
+    await page.waitForSelector('.debug-badge.loaded:has-text("dSYM")', { timeout: 120000 }).catch(async (e) => {
+      throw new Error(`${e.message.split('\n')[0]}; toast: ${await page.locator('.toast').textContent().catch(() => 'none')}`);
+    });
     await page.locator('.side-item', { hasText: 'fixture_arithmetic' }).click();
     await page.waitForSelector('.pline:has-text("fixture_arithmetic(uint32_t a, uint32_t b)")', { timeout: 120000 });
     const { bytes } = await download(page, () => exportItem('export-archive'));
