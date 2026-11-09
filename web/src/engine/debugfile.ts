@@ -5,7 +5,8 @@
 //         added as that file or as a zipped `.dSYM` bundle; matched by LC_UUID
 //   elf   a separate ELF debug file (`objcopy --only-keep-debug`); matched by GNU build ID,
 //         else by the binary's .gnu_debuglink CRC-32
-//   pdb   a PE program database: recognised and refused for now (no PDB reader yet)
+//   pdb   a PE program database (MSF 7.0); matched by the GUID and age of the image's
+//         CodeView (RSDS) debug directory record
 //
 // Matching is OpenDecomp's: the engine only recognises the file, stores it next to the
 // binary and opens the pair; a mismatch fails the open with OpenDecomp's message.
@@ -27,7 +28,7 @@ export interface DebugFileRecord {
 export class DebugFileError extends Error {}
 
 /** Debug file kinds OpenDecomp can read: a record of another kind is stored but not opened. */
-export const SUPPORTED_DEBUG_KINDS: readonly DebugFileKind[] = ['dsym', 'elf'];
+export const SUPPORTED_DEBUG_KINDS: readonly DebugFileKind[] = ['dsym', 'elf', 'pdb'];
 
 const PDB_MAGIC = 'Microsoft C/C++ MSF 7.00\r\n\x1aDS\0\0\0';
 const DSYM_DWARF = /(?:^|\/)[^/]+\.dSYM\/Contents\/Resources\/DWARF\/([^/]+)$/;
@@ -118,7 +119,7 @@ export async function extractDsym(zip: Uint8Array): Promise<{ name: string; byte
 
 /**
  * A dropped or picked file as a debug file for a binary: the DWARF file of a dSYM (also
- * from a zipped bundle), an ELF debug file. Refuses anything else with a clear message.
+ * from a zipped bundle), an ELF debug file, a PDB. Refuses anything else with a clear message.
  */
 export async function readDebugFile(name: string, bytes: Uint8Array): Promise<{ name: string; bytes: Uint8Array; kind: DebugFileKind }> {
   const kind = sniffDebugFile(bytes);
@@ -126,10 +127,9 @@ export async function readDebugFile(name: string, bytes: Uint8Array): Promise<{ 
     const inner = await extractDsym(bytes);
     return { ...inner, kind: 'dsym' };
   }
-  if (kind === 'pdb') throw new DebugFileError(`${name} is a PDB: PE debug information is not supported yet`);
   if (kind === null)
     throw new DebugFileError(
-      `${name} is not a debug file OpenReverse reads: add the DWARF file inside a .dSYM bundle (Contents/Resources/DWARF/…, or the zipped .dSYM), or an ELF debug file (objcopy --only-keep-debug)`,
+      `${name} is not a debug file OpenReverse reads: add the DWARF file inside a .dSYM bundle (Contents/Resources/DWARF/…, or the zipped .dSYM), an ELF debug file (objcopy --only-keep-debug) or a PE's .pdb`,
     );
   return { name, bytes, kind };
 }

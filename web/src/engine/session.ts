@@ -11,6 +11,7 @@ import { recoverRuntimeMetadata } from '@od/metadata/runtime/index.js';
 import { recoverDebugInfo } from '@od/metadata/debug/index.js';
 import type { DebugLine } from '@od/metadata/dwarf/model.js';
 import { elfLoader } from '@od/loaders/elf/index.js';
+import { peLoader } from '@od/loaders/pe/index.js';
 import { ImmutableBytes } from '@od/core/addresses.js';
 import { createOperationContext } from '@od/core/operation.js';
 import { demangleName } from '@od/metadata/symbols/index.js';
@@ -765,7 +766,7 @@ export class AnalysisSession {
         bytes,
         slice_id: (this.binary.image as { selected_slice_id?: string | null }).selected_slice_id ?? null,
       };
-      const loaded = format === 'macho' ? new MachOLoader().load(input, context) : format === 'elf' ? elfLoader.load(input, context) : null;
+      const loaded = format === 'macho' ? new MachOLoader().load(input, context) : format === 'elf' ? elfLoader.load(input, context) : format === 'pe' ? peLoader.load(input, context) : null;
       if (!loaded) return [];
       const debugPath = this.binary.image.debug.companion_sha256 ? this.#workspace.debugPath(this.record) : null;
       const image = debugPath

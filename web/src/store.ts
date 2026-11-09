@@ -252,7 +252,7 @@ export async function uploadAndOpen(file: File): Promise<void> {
 
 /**
  * Several files dropped or picked at once: a binary and its debug file (a dSYM DWARF file or
- * zipped .dSYM, an ELF debug file). The binary is stored, paired with the debug file and opened.
+ * zipped .dSYM, an ELF debug file, a PDB). The binary is stored, paired with the debug file and opened.
  */
 export async function uploadFiles(files: File[]): Promise<void> {
   if (files.length === 1) return uploadAndOpen(files[0]!);
@@ -317,7 +317,8 @@ export async function removeDebugFile(): Promise<void> {
 /** One line on what debug recovery found: `Debug info: 8 functions, 39 types (dSYM, matched by UUID)`. */
 export function debugSummaryText(d: DebugSummary): string {
   if (d.source === 'none') return 'No debug information';
-  const from = d.source === 'companion' ? `debug file, matched by ${d.matched_by === 'uuid' ? 'UUID' : d.matched_by === 'build-id' ? 'build ID' : 'debuglink CRC'}` : 'embedded';
+  const by = { uuid: 'UUID', 'build-id': 'build ID', debuglink: 'debuglink CRC', 'guid-age': 'PDB GUID and age' } as const;
+  const from = d.source === 'companion' ? `${d.matched_by === 'guid-age' ? 'PDB' : 'debug file'}, matched by ${d.matched_by ? by[d.matched_by] : 'identity'}` : 'embedded';
   return `Debug info (${from}): ${d.functions} functions, ${d.types} types, ${d.variables} variables, ${d.lines} line rows${d.status === 'partial' ? ', partly unsupported' : ''}`;
 }
 
