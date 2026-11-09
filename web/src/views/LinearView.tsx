@@ -27,6 +27,8 @@ const EXTEND = 400;
 /** Extend when the viewport is this many rows from an edge of the slice. */
 const EDGE = 150;
 const MAX_ROWS = 6000;
+/** Rows fetched per request when Find searches past the loaded slice. */
+const FIND_CHUNK = 2000;
 
 const isContent = (r: LinearRow): r is InsnRow | DataRow => r.kind === 'insn' || r.kind === 'data';
 const hex = (v: bigint) => `0x${v.toString(16)}`;
@@ -428,15 +430,66 @@ export function LinearView() {
     virt.scrollToIndex(r, { align: 'center' });
   };
   const base = findRow !== null && cursorRow >= findRow && rows.slice(findRow, cursorRow).every((r) => !isContent(r)) ? findRow : cursorRow;
+  // Past the loaded slice, Find reads the listing on from the slice's edge, a window at a
+  // time, with the same row text, and goes to the first match (a new search or closing the
+  // find bar stops it).
+  const [searching, setSearching] = useState<string | null>(null);
+  const findGen = useRef(0);
+  /** The address of a match found past the slice, to mark once its rows are loaded. */
+  const foundAt = useRef<string | null>(null);
+  const searchOn = async (dir: 1 | -1) => {
+    const w = winRef.current;
+    if (!w?.rows.length || !query) return;
+    const g = ++findGen.current;
+    const q = query.toLowerCase();
+    let anchor = dir > 0 ? hex(BigInt(w.rows.at(-1)!.addr) + 1n) : w.rows[0]!.addr;
+    try {
+      for (;;) {
+        setSearching(`searching ${anchor}…`);
+        const r = await api.linear(bid, anchor, dir < 0 ? FIND_CHUNK : 0, dir > 0 ? FIND_CHUNK : 0);
+        if (g !== findGen.current) return;
+        const hit = (dir > 0 ? r.rows : [...r.rows].reverse()).find((row) => rowText(row, width, showBytes, comments).toLowerCase().includes(q));
+        if (hit) {
+          foundAt.current = hit.addr;
+          void navigate(hit.addr);
+          return;
+        }
+        if (!r.rows.length || (dir > 0 ? r.atEnd : r.atStart)) {
+          toast(`Find: no match ${dir > 0 ? 'below' : 'above'} (to the ${dir > 0 ? 'end' : 'start'} of the image)`, 'info');
+          return;
+        }
+        anchor = dir > 0 ? hex(BigInt(r.rows.at(-1)!.addr) + 1n) : r.rows[0]!.addr;
+      }
+    } catch (e) {
+      if (g === findGen.current) toast(`Find: ${e instanceof Error ? e.message : String(e)}`, 'error');
+    } finally {
+      if (g === findGen.current) setSearching(null);
+    }
+  };
+  const more = !!win && !(win.atStart && win.atEnd);
   const step = (dir: 1 | -1) => {
-    if (!matches.length) return;
-    const next = dir > 0 ? (matches.find((r) => r > base) ?? matches[0]!) : (matches.findLast((r) => r < base) ?? matches.at(-1)!);
-    goMatch(next);
+    if (searching) return;
+    const next = dir > 0 ? matches.find((r) => r > base) : matches.findLast((r) => r < base);
+    if (next !== undefined) return goMatch(next);
+    if (win && !(dir > 0 ? win.atEnd : win.atStart)) return void searchOn(dir);
+    if (matches.length) goMatch(dir > 0 ? matches[0]! : matches.at(-1)!);
   };
   useEffect(() => {
+    findGen.current++;
+    setSearching(null);
     if (!query || !matches.length) return setFindRow(null);
     goMatch(matches.find((r) => r >= cursorRow) ?? matches[0]!);
   }, [query]); // eslint-disable-line react-hooks/exhaustive-deps
+  // A match found past the slice: mark it once the slice around it is loaded.
+  useEffect(() => {
+    const at = foundAt.current;
+    if (!at || !query) return;
+    const r = matches.find((i) => rows[i]!.addr === at);
+    if (r === undefined) return;
+    foundAt.current = null;
+    setFindRow(r);
+    virt.scrollToIndex(r, { align: 'center' });
+  }, [matches]); // eslint-disable-line react-hooks/exhaustive-deps
   const findIndex = findRow !== null && base === findRow ? matches.indexOf(findRow) : -1;
   useFindPaint(parentRef, '.row', query, true, (ranges) => {
     if (findRow === null || base !== findRow) return null;
@@ -451,7 +504,7 @@ export function LinearView() {
   if (!win) return <div className="placeholder">Loading the listing…</div>;
   return (
     <div className="code-wrap" onMouseDown={onCodeMouseDown('main', '.row')}>
-      <FindBar pane="main" count={matches.length} index={findIndex} onStep={step} />
+      <FindBar pane="main" count={matches.length} index={findIndex} onStep={step} more={more} status={searching} />
       <div ref={parentRef} className="code-scroll" tabIndex={-1} onScroll={() => void checkEdges()}>
         <div style={{ height: virt.getTotalSize(), position: 'relative' }}>
           {lanes > 0 && items.length > 0 && <Arrows arrows={arrows} first={first} last={last} gutter={gutter} cursor={cursor} />}

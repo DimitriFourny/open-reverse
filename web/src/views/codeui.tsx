@@ -190,8 +190,25 @@ export function useFindPaint(
   }, [rootRef, lineSelector, query, fields, repaint]);
 }
 
-/** The find bar floating at the top right of a pane. */
-export function FindBar({ pane, count, index, onStep }: { pane: Pane; count: number; index: number; onStep: (dir: 1 | -1) => void }) {
+/**
+ * The find bar floating at the top right of a pane. `more`: matches may lie outside what the
+ * pane holds (↑ ↓ then search further); `status` replaces the count while that search runs.
+ */
+export function FindBar({
+  pane,
+  count,
+  index,
+  onStep,
+  more = false,
+  status = null,
+}: {
+  pane: Pane;
+  count: number;
+  index: number;
+  onStep: (dir: 1 | -1) => void;
+  more?: boolean;
+  status?: string | null;
+}) {
   const find = useUi((s) => s.find);
   const inputRef = useRef<HTMLInputElement>(null);
   useEffect(() => {
@@ -228,13 +245,13 @@ export function FindBar({ pane, count, index, onStep }: { pane: Pane; count: num
           }
         }}
       />
-      <span className={`find-count${find.query && count === 0 ? ' none' : ''}`}>
-        {find.query ? (count ? `${index >= 0 ? index + 1 : '–'}/${count}` : 'no match') : ''}
+      <span className={`find-count${find.query && count === 0 && !more && !status ? ' none' : ''}`}>
+        {status ?? (find.query ? (count ? `${index >= 0 ? index + 1 : '–'}/${count}${more ? '+' : ''}` : more ? 'Enter: search on' : 'no match') : '')}
       </span>
-      <button onClick={() => onStep(-1)} disabled={!count} title="Previous (Shift+Enter)">
+      <button onClick={() => onStep(-1)} disabled={!count && !more} title="Previous (Shift+Enter)">
         ↑
       </button>
-      <button onClick={() => onStep(1)} disabled={!count} title="Next (Enter)">
+      <button onClick={() => onStep(1)} disabled={!count && !more} title="Next (Enter)">
         ↓
       </button>
       <button className="close" onClick={close} title="Close (Esc)">

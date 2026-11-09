@@ -116,6 +116,27 @@ describe('node:sqlite shim', () => {
     reread.close();
   });
 
+  test('values bind and read back as node:sqlite gives them', () => {
+    const db = new DatabaseSync(':memory:');
+    db.exec('CREATE TABLE v(t TEXT, i INTEGER, f REAL, b BLOB)');
+    const ins = db.prepare('INSERT INTO v VALUES (?,?,?,?)');
+    ins.run('é€😀 text', 2 ** 40, 1.5, new Uint8Array([1, 2, 3]));
+    ins.run('', -(2n ** 62n), 2, new Uint8Array(0));
+    ins.run(null, -7, null, null);
+    db.prepare('INSERT INTO v VALUES (:t, @i, $f, :b)').run({ t: 'named', '@i': 2 ** 31, $f: 0.25, b: null });
+    const rows = db.prepare('SELECT * FROM v').all();
+    assert.deepEqual(rows[0], { t: 'é€😀 text', i: 2 ** 40, f: 1.5, b: new Uint8Array([1, 2, 3]) });
+    assert.deepEqual(rows[1], { t: '', i: -(2n ** 62n), f: 2, b: new Uint8Array(0) });
+    assert.deepEqual(rows[2], { t: null, i: -7, f: null, b: null });
+    assert.deepEqual(rows[3], { t: 'named', i: 2 ** 31, f: 0.25, b: null });
+    const big = db.prepare('SELECT i, f FROM v WHERE t=?');
+    big.setReadBigInts(true);
+    assert.deepEqual(big.get('named'), { i: 2n ** 31n, f: 0.25 });
+    assert.throws(() => db.prepare('SELECT ?').get(2n ** 64n), /too big/);
+    assert.throws(() => db.prepare('SELECT :a').get({ b: 1 }), /parameter name/);
+    db.close();
+  });
+
   test('rename and unlink of a live database', () => {
     const db = new DatabaseSync('/db/a.sqlite');
     db.exec('CREATE TABLE t(x)');
@@ -139,6 +160,18 @@ describe('crypto + zlib shims', () => {
     const copy = h.copy().update('b');
     assert.equal(copy.digest('hex'), nodeHash('sha256').update('ab').digest('hex'));
     assert.equal(h.digest('hex'), nodeHash('sha256').update('a').digest('hex'));
+    // Every padding case (lengths around the 55/56/64-byte block boundaries), UTF-8 text,
+    // byte input in uneven pieces, and the other output encodings.
+    for (let n = 0; n < 200; n++) {
+      const text = 'é€x'.repeat(n).slice(0, n);
+      assert.equal(hash('sha256', text), nodeHash('sha256').update(text).digest('hex'), `length ${n}`);
+    }
+    const bytes = Uint8Array.from({ length: 70_000 }, (_, i) => (i * 7919) & 255);
+    const pieces = createHash('sha256');
+    for (let at = 0, step = 1; at < bytes.length; at += step, step = (step * 3 + 1) % 997) pieces.update(bytes.subarray(at, at + step));
+    assert.equal(pieces.digest('hex'), nodeHash('sha256').update(bytes).digest('hex'));
+    assert.equal(createHash('sha256').update('abc').digest('base64'), nodeHash('sha256').update('abc').digest('base64'));
+    assert.deepEqual([...(createHash('sha256').update('616263', 'hex').digest() as Uint8Array)], [...nodeHash('sha256').update('abc').digest()]);
   });
   test('zstd shim round-trips and rejects foreign payloads', () => {
     const data = new Uint8Array([1, 2, 3, 4, 5]);

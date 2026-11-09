@@ -372,6 +372,54 @@ export class AnalysisSession {
 
   // ---------------------------------------------------------------- discovery
 
+  /** Interactive requests in flight (listing windows, function listings, decompiles), and started so far. */
+  #foreground = 0;
+  #started = 0;
+  #foregroundWaiters: (() => void)[] = [];
+
+  /** Runs an interactive request: background discovery steps let it go first. */
+  async #interactive<T>(fn: () => Promise<T>): Promise<T> {
+    this.#foreground++;
+    this.#started++;
+    for (const wake of this.#foregroundWaiters.splice(0)) wake();
+    try {
+      return await fn();
+    } finally {
+      if (--this.#foreground === 0) for (const wake of this.#foregroundWaiters.splice(0)) wake();
+    }
+  }
+
+  /** Resolves when `ready()` holds (checked on every change of the interactive requests) or after `ms`. */
+  #waitFor(ready: () => boolean, ms: number): Promise<void> {
+    return new Promise((resolve) => {
+      const timer = setTimeout(resolve, Math.max(0, ms));
+      const check = () => {
+        if (!ready()) return void this.#foregroundWaiters.push(check);
+        clearTimeout(timer);
+        resolve();
+      };
+      check();
+    });
+  }
+
+  /**
+   * Before a discovery step: a step is one long OpenDecomp request (seconds to minutes on a
+   * large stripped binary) that requests sent after it wait for. On opening, give the UI its
+   * first listing and pseudocode first; later, let interactive requests finish (the UI often
+   * sends the next one right after an answer, so wait for a short quiet period). The waits
+   * are capped so that browsing cannot hold discovery off for long.
+   */
+  async #yieldToForeground(first: boolean): Promise<void> {
+    const deadline = Date.now() + (first ? 8000 : 5000);
+    if (first) await this.#waitFor(() => this.#started > 0, 2000);
+    while (Date.now() < deadline) {
+      await this.#waitFor(() => this.#foreground === 0, deadline - Date.now());
+      const started = this.#started;
+      await new Promise((resolve) => setTimeout(resolve, 400));
+      if (this.#foreground === 0 && this.#started === started) return;
+    }
+  }
+
   /** Whole-image function discovery, one committed step at a time, in the background. */
   async #discover(): Promise<void> {
     const index = await this.functions();
@@ -381,7 +429,8 @@ export class AnalysisSession {
     }
     this.discovery = { state: 'running', message: null };
     try {
-      for (;;) {
+      for (let step = 0; ; step++) {
+        await this.#yieldToForeground(step === 0);
         const progressed = await this.#writes.run(async () => {
           const step = await this.#service.execute('functions_discover', {
             ...this.#ctx,
@@ -772,7 +821,7 @@ export class AnalysisSession {
 
   /** Disassembly plus CFG of one function, with operand constants resolved to names. */
   async listing(functionId: string) {
-    const core = await this.#cachedListing(functionId);
+    const core = await this.#interactive(() => this.#cachedListing(functionId));
     const comments = await this.#workspace.comments(this.record.id);
     const inRange = new Set(core.instructions.map((i) => i.addr));
     return { ...core, comments: Object.fromEntries(Object.entries(comments).filter(([a]) => inRange.has(a))) };
@@ -1101,8 +1150,7 @@ export class AnalysisSession {
 
   /** Rows of the whole-image listing around an address (see linear.ts). */
   async linear(addr: string, before: number, after: number, quick = false) {
-    const listing = await this.#linearListing();
-    return listing.window(BigInt(addr), before, after, quick);
+    return this.#interactive(async () => (await this.#linearListing()).window(BigInt(addr), before, after, quick));
   }
 
   // ------------------------------------------------------- data definitions
@@ -1293,7 +1341,7 @@ export class AnalysisSession {
     }
     let p = this.#inflight.get(key);
     if (!p) {
-      p = this.gate.shared(() => this.decompileOnce(functionId, options, signal));
+      p = this.#interactive(() => this.gate.shared(() => this.decompileOnce(functionId, options, signal)));
       this.#inflight.set(key, p);
       const clear = () => {
         if (this.#inflight.get(key) === p) this.#inflight.delete(key);
