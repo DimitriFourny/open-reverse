@@ -14,7 +14,7 @@ Supported formats: **Mach-O ARM64, ELF x86-64 and PE x86-64**.
 
 - **Disassembly** of the whole image (code and data) and a **control-flow graph** per function, with ARM64 `ADRP` pairs, GOT slots and Objective-C messages resolved into comments.
 - **Pseudo-C / pseudo-Python** linked both ways with the disassembly.
-- **Debug information**: DWARF embedded in Mach-O and ELF binaries, or from a debug file you add (a `.dSYM`, an ELF `--only-keep-debug` file): names, prototypes, structures, globals and locals in the pseudocode.
+- **Debug information**: DWARF embedded in Mach-O and ELF binaries, or from a debug file you add (a `.dSYM`, an ELF `--only-keep-debug` file, a PE's `.pdb`): names, prototypes, structures, globals, locals and source lines.
 - **Annotate** with IDA-style keys: rename (`N`), types and signatures (`Y`), comments (`;`), data definitions (`D` `A` `O` `*` `U`), structures, bookmarks, all undoable (`Ctrl+Z`).
 - **Navigate**: cross-references to and from (`X`, `Shift+X`), a call tree, a colour navigation band, go-to by name or address, and binary-wide search for bytes, text and immediates (`Alt+B` `Alt+T` `Alt+I`).
 - **Script** the analysis from a JavaScript console (`Shift+F2`).

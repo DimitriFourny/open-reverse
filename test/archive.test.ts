@@ -258,6 +258,11 @@ describe('project archive', () => {
     const back = await decodeProjectArchive(bytes);
     assert.deepEqual(back.record.debug, a.record.debug);
     assert.deepEqual(back.debug, debug);
+    // A PE's PDB travels the same way.
+    const pdb = { ...a, record: { ...a.record, debug: { ...a.record.debug!, name: 'demo.pdb', kind: 'pdb' as const } } };
+    const pdbBack = await decodeProjectArchive(await encodeProjectArchive(pdb));
+    assert.deepEqual(pdbBack.record.debug, pdb.record.debug);
+    assert.deepEqual(pdbBack.debug, debug);
     // Without a debug file nothing changes: version 1 or 2 as before, no debug entry.
     const plain = await encodeProjectArchive(sample());
     assert.ok(!(await zipDecode(plain)).some((e) => e.path.startsWith('debug/')));

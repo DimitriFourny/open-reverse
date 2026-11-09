@@ -3,7 +3,7 @@
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { describe, test } from 'node:test';
-import { DebugFileError, extractDsym, looksLikeDebugFile, readDebugFile, sniffDebugFile } from '../web/src/engine/debugfile.ts';
+import { DebugFileError, extractDsym, looksLikeDebugFile, readDebugFile, sniffDebugFile, SUPPORTED_DEBUG_KINDS } from '../web/src/engine/debugfile.ts';
 import { zipEncode } from '../web/src/engine/zip.ts';
 
 const OD = new URL('../vendor/open-decomp/', import.meta.url);
@@ -15,13 +15,16 @@ const elfDebug = file('test/metadata/debug/fixtures/elf/shapes.debug');
 const elfStripped = file('test/metadata/debug/fixtures/elf/shapes-stripped');
 const elfWithDwarf = file('test/metadata/debug/fixtures/elf/shapes-g');
 const pe = file('fixtures/bin/pe-x86_64-symbols.exe');
+const pdb = file('test/metadata/debug/fixtures/pe/shapes-O0.pdb');
+const peWithPdb = file('test/metadata/debug/fixtures/pe/shapes-O0.exe');
 
 describe('debug files', () => {
   test('recognised by content: dSYM DWARF, ELF debug file, PDB; binaries are not debug files', () => {
     assert.equal(sniffDebugFile(dsym), 'dsym');
     assert.equal(sniffDebugFile(elfDebug), 'elf');
-    assert.equal(sniffDebugFile(new TextEncoder().encode('Microsoft C/C++ MSF 7.00\r\n\x1aDS\0\0\0rest')), 'pdb');
-    for (const binary of [machoBinary, universal, elfStripped, elfWithDwarf, pe, new Uint8Array(0)]) assert.equal(sniffDebugFile(binary), null);
+    assert.equal(sniffDebugFile(pdb), 'pdb');
+    for (const binary of [machoBinary, universal, elfStripped, elfWithDwarf, pe, peWithPdb, new Uint8Array(0)]) assert.equal(sniffDebugFile(binary), null);
+    assert.equal(looksLikeDebugFile('shapes-O0.pdb', pdb), true);
     assert.equal(looksLikeDebugFile('shapes.debug', elfDebug), true);
     assert.equal(looksLikeDebugFile('app', machoBinary), false);
     assert.equal(looksLikeDebugFile('libfoo.so.debug', new Uint8Array(10)), true);
@@ -48,7 +51,9 @@ describe('debug files', () => {
 
   test('anything else is refused with what to add instead', async () => {
     await assert.rejects(readDebugFile('app', machoBinary), (e) => e instanceof DebugFileError && /not a debug file/.test(e.message));
-    await assert.rejects(readDebugFile('app.pdb', new TextEncoder().encode('Microsoft C/C++ MSF 7.00\r\n\x1aDS\0\0\0')), /PDB/);
     assert.equal((await readDebugFile('shapes.debug', elfDebug)).kind, 'elf');
+    // A PDB is read as is; OpenDecomp matches it to the PE by GUID and age.
+    assert.deepEqual(await readDebugFile('shapes-O0.pdb', pdb), { name: 'shapes-O0.pdb', bytes: pdb, kind: 'pdb' });
+    assert.ok(SUPPORTED_DEBUG_KINDS.includes('pdb'));
   });
 });
