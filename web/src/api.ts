@@ -47,6 +47,35 @@ export interface FunctionSummary {
   boundary: string;
   analysis: string;
   importStub: boolean;
+  /** Named by a library signature match: the signature library's id. */
+  library: string | null;
+}
+
+/** A signature library the Signatures panel lists (see engine/signatures.ts). */
+export interface SignatureInfo {
+  id: string;
+  title: string;
+  kind: 'bundled' | 'user';
+  architecture: 'x86_64' | 'arm64';
+  signatures: number;
+  bytes: number;
+  source: string;
+  contracts: string | null;
+}
+
+/** What applying signature libraries did. `edits` put the names back after an undo. */
+export interface SignatureApplication {
+  revision: number;
+  edits: unknown[];
+  /** Functions named, per library id. */
+  matched: Record<string, number>;
+  /** Of those, x86-64 IFUNC PLT entries named after their resolver. */
+  stubs: number;
+  /** Bodies left unnamed because several names fit ("one of N"). */
+  ambiguous: { entry: string; candidates: string[] }[];
+  /** Functions without a name before the application. */
+  unnamed: number;
+  ms: number;
 }
 
 export interface Discovery {
@@ -409,6 +438,24 @@ export const api = {
   /** Two functions of the last diff, aligned line by line (null: a function only one side has). */
   diffFunction: (bidA: string, fidA: string | null, bidB: string, fidB: string | null) =>
     call<{ a: Line[]; b: Line[]; rows: AlignedRow[] }>('diffFunction', [bidA, fidA, bidB, fidB]),
+  // ------------------------------------------------- library signatures
+  /** Bundled (from `base`, the site's signatures/ URL) and user signature libraries; with a binary, the ones it suggests. */
+  signatureLibraries: (base: string, bid?: string) =>
+    call<{ libraries: SignatureInfo[]; suggested: Record<string, string> }>('signatureLibraries', [base, bid]),
+  applySignatures: (bid: string, ids: string[]) => call<SignatureApplication>('applySignatures', [bid, ids]),
+  removeSignatureMatches: (bid: string, annotationIds: string[]) => call<{ revision: number }>('removeSignatureMatches', [bid, annotationIds]),
+  restoreSignatureMatches: (bid: string, edits: unknown[]) => call<{ revision: number }>('restoreSignatureMatches', [bid, edits]),
+  /** A user library from the binary's named functions (a background task). */
+  makeSignatures: (bid: string, title: string, onProgress?: (p: TaskProgress) => void, signal?: AbortSignal) =>
+    call<{ library: SignatureInfo; stats: { bodies: number; signatures: number; shared: number; skipped: number } }>('makeSignatures', [bid, title], signal, [], onProgress),
+  /** A user library from dropped static libraries / objects (ELF x86-64 .a / .o). */
+  makeObjectSignatures: async (title: string, files: File[]) => {
+    const list = await Promise.all(files.map(async (f) => ({ name: f.name, bytes: new Uint8Array(await f.arrayBuffer()) })));
+    return call<{ library: SignatureInfo; stats: { bodies: number; signatures: number; shared: number; skipped: number } }>(
+      'makeObjectSignatures', [title, list], undefined, list.map((f) => f.bytes.buffer));
+  },
+  deleteSignatures: (id: string) => call<{ ok: true }>('deleteSignatures', [id]),
+  exportSignatures: (id: string) => call<{ name: string; bytes: Uint8Array }>('exportSignatures', [id]),
   comments: (bid: string) => call<{ comments: Record<string, string> }>('comments', [bid]),
   rename: (bid: string, target: { id?: string; addr?: string }, name: string) => call<{ revision: number; note: string | null }>('rename', [bid, target, name]),
   /** `annotations`: the library annotation of each declared name. */

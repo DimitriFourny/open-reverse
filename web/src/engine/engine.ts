@@ -13,6 +13,8 @@ import { autoThreads, deviceMemory, jsHeapUsed, type EngineMemory } from './memo
 import { sqliteHeapBytes } from './shims/sqlite.ts';
 import type { DataDef } from './linear.ts';
 import { Workspace, type BinaryRecord } from './workspace.ts';
+import { buildSignatureLibrary, objectSources, SignatureStore, suggestLibraries, userLibraryId } from './signatures.ts';
+import { createHash } from './shims/crypto.ts';
 import { alignLines, DIFFSIG_VERSION, diffRows, matchFunctions, type DiffResult, type DiffSide, type FunctionSig } from './bindiff.ts';
 
 type Target = { id?: string; addr?: string };
@@ -26,6 +28,7 @@ function addr(value: string | undefined, name = 'addr'): string {
 
 export class Engine {
   readonly workspace = new Workspace();
+  readonly signatures = new SignatureStore();
   readonly #sessions = new Map<string, Promise<AnalysisSession>>();
   /** Closes in progress: opening the binary again waits for its close (one owner per project). */
   readonly #closing = new Map<string, Promise<void>>();
@@ -36,6 +39,7 @@ export class Engine {
 
   async init(): Promise<void> {
     await this.workspace.init();
+    await this.signatures.init();
   }
 
   /** Parallel decompile workers for binaries opened from now on (1 = all in the engine thread). */
@@ -496,6 +500,110 @@ export class Engine {
 
   async comments(bid: string) {
     return { comments: await (await this.#session(bid)).comments() };
+  }
+
+  // ------------------------------------------------------- library signatures
+
+  /**
+   * The signature libraries (bundled ones from `base`, the URL of the site's signatures/
+   * directory, and the user's), and for an open binary the bundled ones its strings suggest
+   * (version strings, library messages), with the reason.
+   */
+  async signatureLibraries(base: string, bid?: string) {
+    const libraries = await this.signatures.list(String(base));
+    const suggested: Record<string, string> = {};
+    if (bid) {
+      const s = await this.#session(bid);
+      const target = s.binary.image.target;
+      const strings = (await s.strings()).map((item) => item.text);
+      for (const [id, text] of suggestLibraries(libraries, strings, target.architecture)) suggested[id] = `string "${text}"`;
+      const imports = (await s.functions()).list.some((f) => f.importStub);
+      if (target.format === 'elf' && !imports)
+        for (const library of libraries)
+          if (library.kind === 'bundled' && /^(glibc|libgcc)-/.test(library.id) && library.architecture === target.architecture)
+            suggested[library.id] ??= 'statically linked (no imports)';
+    }
+    return { libraries, suggested };
+  }
+
+  /** Match signature libraries (ids) against a binary and name the functions they find. */
+  async applySignatures(bid: string, ids: string[]) {
+    if (!Array.isArray(ids) || !ids.length) throw new ApiError(400, 'No signature library');
+    const libraries = await Promise.all(ids.map((id) => this.signatures.load(String(id))));
+    const result = await (await this.#session(bid)).applySignatures(libraries);
+    void vfs.flush();
+    return result;
+  }
+
+  /** Undo of an application: remove its annotations. */
+  async removeSignatureMatches(bid: string, annotationIds: string[]) {
+    if (!Array.isArray(annotationIds)) throw new ApiError(400, 'Missing annotation ids');
+    const revision = await (await this.#session(bid)).removeAnnotations(annotationIds.map(String));
+    void vfs.flush();
+    return { revision };
+  }
+
+  /** Redo of an application: its edits again. */
+  async restoreSignatureMatches(bid: string, edits: unknown[]) {
+    if (!Array.isArray(edits)) throw new ApiError(400, 'Missing edits');
+    const revision = await (await this.#session(bid)).restoreSignatureEdits(edits);
+    void vfs.flush();
+    return { revision };
+  }
+
+  /** A user signature library from a binary with symbols (its named functions). */
+  makeSignatures(bid: string, title: string, ctx: TaskContext) {
+    return this.#task(bid, async () => {
+      const s = await this.#session(bid);
+      const sources = await s.linkedSignatureSources(ctx);
+      const architecture = s.binary.image.target.architecture === 'arm64' ? 'arm64' : 'x86_64';
+      const record = s.record;
+      const { library, stats } = buildSignatureLibrary(sources, {
+        id: userLibraryId(title || record.name, architecture, record.sha256),
+        title: title || record.name,
+        architecture,
+        contracts: null,
+        source: `${record.name} (sha256 ${record.sha256.slice(0, 16)}), functions with symbols`,
+      });
+      const info = this.signatures.save(library);
+      void vfs.flush();
+      return { library: info, stats };
+    });
+  }
+
+  /** A user signature library from static libraries or objects (ELF x86-64 `.a` / `.o`). */
+  async makeObjectSignatures(title: string, files: { name: string; bytes: Uint8Array }[]) {
+    if (!Array.isArray(files) || !files.length) throw new ApiError(400, 'No file');
+    let sources;
+    try {
+      sources = objectSources(files);
+    } catch (error) {
+      throw new ApiError(422, error instanceof Error ? error.message : String(error));
+    }
+    if (!sources.length) throw new ApiError(422, 'No function found (ELF x86-64 relocatable objects only)');
+    const salt = createHash('sha256');
+    for (const file of files) salt.update(file.bytes);
+    const name = title || files.map((f) => f.name).join('+');
+    const { library, stats } = buildSignatureLibrary(sources, {
+      id: userLibraryId(name, 'x86_64', String(salt.digest('hex'))),
+      title: name,
+      architecture: 'x86_64',
+      contracts: null,
+      source: files.map((f) => f.name).join(', '),
+    });
+    const info = this.signatures.save(library);
+    void vfs.flush();
+    return { library: info, stats };
+  }
+
+  async deleteSignatures(id: string) {
+    this.signatures.remove(String(id));
+    void vfs.flush();
+    return { ok: true as const };
+  }
+
+  exportSignatures(id: string) {
+    return this.signatures.file(String(id));
   }
 
   async rename(bid: string, target: Target, name: string) {

@@ -1044,6 +1044,89 @@ return (await or.xrefsTo(s.addr)).length`);
     await page.waitForSelector('.debug-badge:has-text("+ debug")', { timeout: 120000 });
   });
 
+  // Library signatures (Shift+F5). zdemo-stripped: zlib linked statically into a stripped program
+  // (test/fixtures/signatures/zdemo.c); libsigfix.a / sigfix-stripped: OpenDecomp's fixtures.
+  const SIGS = fileURLToPath(new URL('../fixtures/signatures/', import.meta.url));
+  const SIGFIX = fileURLToPath(new URL('../../vendor/open-decomp/test/metadata/fixtures/signatures/', import.meta.url));
+  // Discovery starts once the first listing is shown (and waits a few seconds for the UI).
+  const discovered = async () => {
+    await page.waitForSelector('.busy:has-text("Discovering")', { timeout: 12000 }).catch(() => undefined);
+    await page.waitForSelector('.busy:has-text("Discovering")', { state: 'detached', timeout: 300000 });
+  };
+  const signatures = async () => {
+    await page.keyboard.press('Shift+F5');
+    await page.waitForSelector('.signatures-dialog .sig-table input[type=checkbox]', { timeout: 60000 });
+  };
+  const applyOnly = async (row) => {
+    for (const c of await page.locator('.sig-table input[type=checkbox]').all()) if (await c.isChecked()) await c.uncheck();
+    await page.locator('.sig-table tr', { hasText: row }).locator('input[type=checkbox]').check();
+    await page.locator('.signatures-dialog button.primary').click();
+    await page.waitForSelector('[data-testid=sig-result]', { timeout: 180000 });
+    return page.locator('[data-testid=sig-result]').innerText();
+  };
+  await step('library signatures: zlib suggested and applied to a stripped program (Shift+F5), callers named, cyan in the list, undo / redo', async () => {
+    await page.locator('.brand').click();
+    await page.setInputFiles('input[type=file]', SIGS + 'zdemo-stripped');
+    await page.waitForSelector('.row.insn', { timeout: 120000 });
+    await discovered();
+    await signatures();
+    await page.waitForSelector('.sig-table tr:has-text("zlib 1.3.1") .sig-badge.suggested');
+    const result = await applyOnly('zlib 1.3.1');
+    if (!/Named \d+ from zlib-1\.3\.1-x86_64/.test(result)) throw new Error(`result: ${result}`);
+    await page.keyboard.press('Escape');
+    await page.waitForSelector('.signatures-dialog', { state: 'detached' });
+    await page.waitForSelector('.side-item.library:has-text("compress2")', { timeout: 60000 });
+    const title = await page.locator('.side-item.library', { hasText: 'uncompress' }).first().getAttribute('title');
+    if (!title.includes('library function (signatures zlib-1.3.1-x86_64)')) throw new Error(`title: ${title}`);
+    // main (0x10c0) calls them by name now.
+    await page.keyboard.press('g');
+    await page.fill('.modal-input', '0x10c0');
+    await page.keyboard.press('Enter');
+    await page.waitForSelector('.pline:has-text("compress2(")', { timeout: 180000 });
+    await page.waitForSelector('.pline:has-text("adler32(1, ")');
+    await page.keyboard.press('Control+z');
+    await page.waitForSelector('.side-item.library', { state: 'detached', timeout: 60000 });
+    await page.waitForSelector('.pline:has-text("sub_2ae0(")', { timeout: 180000 });
+    await page.keyboard.press('Control+Shift+z');
+    await page.waitForSelector('.side-item.library:has-text("compress2")', { timeout: 60000 });
+  });
+  await step('signature kit: a library from a binary with symbols names its stripped build (ARM64 Mach-O); one from a dropped .a, with "one of" two left unnamed', async () => {
+    await page.locator('.brand').click();
+    await page.setInputFiles('input[type=file]', FIX + 'macho-arm64-symbols');
+    await page.waitForSelector('.row.insn', { timeout: 120000 });
+    await signatures();
+    await page.fill('.sig-make .modal-input', 'fixture kit');
+    await page.locator('.sig-make button', { hasText: "From this binary's symbols" }).click();
+    await page.waitForSelector('.sig-table tr:has-text("fixture kit") .sig-badge:has-text("yours")', { timeout: 120000 });
+    await page.keyboard.press('Escape');
+    await page.locator('.brand').click();
+    await page.setInputFiles('input[type=file]', FIX + 'macho-arm64-stripped');
+    await page.waitForSelector('.row.insn', { timeout: 120000 });
+    await discovered();
+    await signatures();
+    const kit = await applyOnly('fixture kit');
+    if (!/Named 1[0-9] from user-fixture_kit/.test(kit)) throw new Error(`kit: ${kit}`);
+    await page.keyboard.press('Escape');
+    await page.waitForSelector('.side-item.library:has-text("_fixture_arithmetic")', { timeout: 60000 });
+    await page.locator('.brand').click();
+    await page.setInputFiles('input[type=file]', SIGFIX + 'sigfix-stripped');
+    await page.waitForSelector('.row.insn', { timeout: 120000 });
+    await discovered();
+    await signatures();
+    await page.fill('.sig-make .modal-input', 'sigfix');
+    await page.setInputFiles('[data-testid=sig-files]', SIGFIX + 'libsigfix.a');
+    await page.waitForSelector('.sig-table tr:has-text("sigfix")', { timeout: 60000 });
+    const fix = await applyOnly('sigfix');
+    if (!/Named 4 from/.test(fix) || !/one of sig_mix, sig_mix_copy/.test(fix)) throw new Error(`sigfix: ${fix}`);
+    // The user's library downloads, and goes.
+    const [dl] = await Promise.all([page.waitForEvent('download'), page.locator('.sig-table tr', { hasText: 'sigfix' }).locator('button[title^="Download"]').click()]);
+    if (!JSON.parse(readFileSync(await dl.path(), 'utf8')).functions.length) throw new Error('empty download');
+    await page.locator('.sig-table tr', { hasText: 'sigfix' }).locator('button[title^="Delete"]').click();
+    await page.waitForSelector('.sig-table tr:has-text("sigfix")', { state: 'detached' });
+    await page.keyboard.press('Escape');
+    await page.waitForSelector('.side-item.library:has-text("sig_dup")', { timeout: 60000 });
+  });
+
   console.log('console errors:', errors.length ? errors : 'none');
   await browser.close();
   process.exit(failures || errors.length ? 1 : 0);

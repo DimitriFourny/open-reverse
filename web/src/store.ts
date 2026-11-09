@@ -22,6 +22,7 @@ import {
   type DataDef,
   type XrefDirection,
   type DebugSummary,
+  type SignatureApplication,
 } from './api.ts';
 import { historyFor, type UndoEntry } from './undo.ts';
 import { looksLikeDebugFile } from './engine/debugfile.ts';
@@ -70,6 +71,8 @@ export type Dialog =
   | { kind: 'diffWith' }
   /** The open binary's debug information: what was found, add/replace/remove its debug file. */
   | { kind: 'debugInfo' }
+  /** Shift+F5: library signatures (IDA's signatures window). */
+  | { kind: 'signatures' }
   | { kind: 'open' };
 
 export type XrefTarget = { id?: string; addr?: string };
@@ -965,6 +968,38 @@ export function beginComment(): void {
 // ------------------------------------------------- types and signatures
 
 /** After an annotation batch: new revision, so every view (and every caller) re-decompiles. */
+/**
+ * Applies signature libraries to the open binary: the functions they recognize are named
+ * (OpenDecomp `library_match` annotations, with the library's declarations). One undo step.
+ */
+export const applySignatures = tracked(async (ids: string[], label: string): Promise<SignatureApplication | null> => {
+  const bid = state.bid;
+  if (!bid) return null;
+  try {
+    const result = await api.applySignatures(bid, ids);
+    const annotationIds = result.edits.map((e) => (e as { id: string }).id);
+    await refreshAfterAnnotation();
+    if (annotationIds.length)
+      record(bid, {
+        label: `signatures ${label}`,
+        undo: async () => {
+          await api.removeSignatureMatches(bid, annotationIds);
+          await refreshAfterAnnotation();
+        },
+        redo: async () => {
+          await api.restoreSignatureMatches(bid, result.edits);
+          await refreshAfterAnnotation();
+        },
+      });
+    const named = Object.values(result.matched).reduce((a, b) => a + b, 0);
+    toast(`${label}: ${named} function${named === 1 ? '' : 's'} named${result.ambiguous.length ? `, ${result.ambiguous.length} ambiguous left unnamed` : ''}`);
+    return result;
+  } catch (e) {
+    if (state.bid === bid) toast(`Signatures: ${errorText(e)}`, 'error');
+    return null;
+  }
+});
+
 async function refreshAfterAnnotation(): Promise<void> {
   await loadFunctions();
   setState({ types: idle() });
