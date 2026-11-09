@@ -7,13 +7,15 @@ import { Buffer } from 'buffer';
 import { EventEmitter } from 'events';
 import { parseFrames, type HelperIn, type HelperOut, type ShippedFile } from '../helper-protocol.ts';
 import { vfs } from '../vfs.ts';
+import { setImmediateTask } from './immediate.ts';
 
 let nextPid = 1000;
 
 type WriteCb = (error?: Error | null) => void;
 
+/** The next macrotask, as a Node stream event would come (unclamped: see immediate.ts). */
 function later(fn: () => void): void {
-  setTimeout(fn, 0);
+  setImmediateTask(fn);
 }
 
 class ChildStdin extends EventEmitter {

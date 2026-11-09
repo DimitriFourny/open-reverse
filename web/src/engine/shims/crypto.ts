@@ -1,24 +1,26 @@
 // node:crypto subset: synchronous SHA-256 (OpenDecomp derives every identity from it).
-import { sha256 } from '@noble/hashes/sha2.js';
 import { Buffer } from 'buffer';
+import { Sha256, sha256TextHex, toHex } from './sha256.ts';
 
 type Input = string | Uint8Array | ArrayBufferView;
-const bytes = (data: Input, encoding?: string): Uint8Array =>
-  typeof data === 'string'
-    ? Buffer.from(data, (encoding as BufferEncoding | undefined) ?? 'utf8')
-    : data instanceof Uint8Array
-      ? data
-      : new Uint8Array(data.buffer, data.byteOffset, data.byteLength);
+
+function absorb(h: Sha256, data: Input, encoding?: string): void {
+  if (typeof data === 'string') {
+    if (!encoding || encoding === 'utf8' || encoding === 'utf-8') h.updateText(data);
+    else h.update(Buffer.from(data, encoding as BufferEncoding));
+  } else h.update(data instanceof Uint8Array ? data : new Uint8Array(data.buffer, data.byteOffset, data.byteLength));
+}
 
 function output(digest: Uint8Array, encoding?: string) {
+  if (encoding === 'hex') return toHex(digest);
   const buf = Buffer.from(digest.buffer, digest.byteOffset, digest.byteLength);
   return encoding ? buf.toString(encoding as BufferEncoding) : buf;
 }
 
 class Hash {
-  #h = sha256.create();
+  #h = new Sha256();
   update(data: Input, encoding?: string): this {
-    this.#h.update(bytes(data, encoding));
+    absorb(this.#h, data, encoding);
     return this;
   }
   digest(encoding?: string) {
@@ -26,7 +28,7 @@ class Hash {
   }
   copy(): Hash {
     const h = new Hash();
-    h.#h = this.#h.clone();
+    h.#h = this.#h.copy();
     return h;
   }
 }
@@ -42,7 +44,11 @@ export function createHash(algorithm: string): Hash {
 
 export function hash(algorithm: string, data: Input, outputEncoding: string = 'hex') {
   check(algorithm);
-  return output(sha256(bytes(data)), outputEncoding === 'buffer' ? undefined : outputEncoding);
+  // OpenDecomp's fingerprint(): the hex digest of a canonical string.
+  if (typeof data === 'string' && outputEncoding === 'hex') return sha256TextHex(data);
+  const h = new Sha256();
+  absorb(h, data);
+  return output(h.digest(), outputEncoding === 'buffer' ? undefined : outputEncoding);
 }
 
 export function randomBytes(n: number): Buffer {

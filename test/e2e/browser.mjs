@@ -743,6 +743,18 @@ return (await or.xrefsTo(s.addr)).length`);
     console.log('     ', await page.locator('.side-count').textContent());
     await page.waitForSelector('.pline', { timeout: 180000 });
   });
+  if (existsSync(STRIPPED)) await step('find past the loaded slice of the listing (Ctrl+F, Enter reads on)', async () => {
+    await page.locator('.row.insn.cur-fn').first().click();
+    await page.keyboard.press('Control+f');
+    // A string of .rodata, far below the code around the cursor.
+    await page.keyboard.type('for more information');
+    await page.waitForSelector('.pane-main .find-count:text-is("Enter: search on")');
+    await page.keyboard.press('Enter');
+    await page.waitForFunction(() => /for more information/.test(document.querySelector('.pane-main .row.cursor')?.textContent ?? ''), null, { timeout: 120000 });
+    await page.waitForFunction(() => /^\d+\/\d+\+$/.test(document.querySelector('.pane-main .find-count')?.textContent ?? ''));
+    await page.keyboard.press('Escape');
+    await page.waitForSelector('.find-bar', { state: 'detached' });
+  });
 
   // ------------------------------------------------ data in / out, storage
   const download = async (p, click, timeout = 300000) => {
