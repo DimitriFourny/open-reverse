@@ -7,6 +7,7 @@ import { declareTypes, loadTypes, removeLibraryType, useStore } from '../store.t
 import { splitLines, tokenize } from '../syntax.ts';
 import { declaredMembers } from '../engine/structs.ts';
 import { StructEditor, type StructDraft } from './StructEditor.tsx';
+import { TypeLibraries } from './TypeLibraries.tsx';
 
 /** The editor's text survives switching views. */
 let savedDraft = '';
@@ -173,6 +174,7 @@ export function TypesView() {
             </div>
           ))
         )}
+        <TypeLibraries />
         <div className="types-section">
           Recovered types
           {types.data && (

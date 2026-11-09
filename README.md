@@ -18,6 +18,7 @@ Supported formats: **Mach-O ARM64, ELF x86-64 and PE x86-64**.
 - **Annotate** with IDA-style keys: rename (`N`), types and signatures (`Y`), comments (`;`), data definitions (`D` `A` `O` `*` `U`), structures, bookmarks, all undoable (`Ctrl+Z`).
 - **Navigate**: cross-references to and from (`X`, `Shift+X`), a call tree, a colour navigation band, go-to by name or address, and binary-wide search for bytes, text and immediates (`Alt+B` `Alt+T` `Alt+I`).
 - **Script** the analysis from a JavaScript console (`Shift+F2`).
+- **Type libraries** (like IDA's): calls to glibc, libSystem and Windows APIs get the real header structures (`entry->d_name`, `tm->tm_hour`) and constant names (`open(path, O_WRONLY | O_CREAT | O_TRUNC, 0644)`, `VirtualAlloc(…, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE)`); browse and import the platform's header types (`Shift+F11`), and show any constant as an enum member (`M`).
 - **Library signatures** (`Shift+F5`, like IDA's FLIRT): name the glibc, zlib, OpenSSL… functions of stripped and statically linked binaries, with their C prototypes, so the code calling them reads `memcpy(dst, src, n)`; make your own signatures from a build with symbols or from `.a` / `.o` files.
 - **Diff** two versions of a binary function by function.
 - **Keep your work**: projects persist in the browser, and you can export project archives and every function's pseudocode.

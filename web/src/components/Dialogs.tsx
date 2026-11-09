@@ -8,6 +8,7 @@ import {
   renameVariable,
   setBookmark,
   setComment,
+  setEnumDisplay,
   setSignature,
   setState,
   setType,
@@ -19,6 +20,7 @@ import { DebugInfoDialog } from './DebugInfo.tsx';
 import { DiffPicker } from './DiffView.tsx';
 import { SignaturesDialog } from './Signatures.tsx';
 import { cmpAddr, functionOffset, mangledNote, padAddr, parseAddress } from '../util.ts';
+import { formatEnum } from '../engine/enums.ts';
 
 function Modal({ title, children, onClose }: { title: string; children: React.ReactNode; onClose: () => void }) {
   return (
@@ -367,10 +369,79 @@ export function Dialogs() {
       />
     );
   if (dialog.kind === 'bookmarks') return <BookmarksDialog />;
+  if (dialog.kind === 'enum') return <EnumDialog dialog={dialog} />;
   if (dialog.kind === 'diffWith') return <DiffPicker />;
   if (dialog.kind === 'debugInfo') return <DebugInfoDialog onClose={close} />;
   if (dialog.kind === 'signatures') return <SignaturesDialog onClose={close} />;
   return null;
+}
+
+/**
+ * M on a constant: the enums whose members spell its value (bundled for the platform, then
+ * declared in the type library), with the text each would show; Enter applies, Reset shows
+ * the number again.
+ */
+function EnumDialog({ dialog }: { dialog: Extract<Dialog, { kind: 'enum' }> }) {
+  const catalog = useStore((s) => s.enumCatalog) ?? [];
+  const current = useStore((s) => s.enumDisplays[dialog.key] ?? null);
+  const [text, setText] = useState('');
+  const [sel, setSel] = useState(0);
+  const inputRef = useRef<HTMLInputElement>(null);
+  useEffect(() => inputRef.current?.focus(), []);
+  const value = BigInt(`0x${dialog.value}`);
+  const rows = useMemo(() => {
+    const t = text.trim().toLowerCase();
+    return catalog
+      .map((def) => ({ def, shown: formatEnum(def, value) }))
+      .filter((r) => r.shown !== null && (!t || r.def.name.toLowerCase().includes(t) || r.shown.toLowerCase().includes(t)))
+      .sort((a, b) => Number(b.def.source === 'user') - Number(a.def.source === 'user'));
+  }, [catalog, value, text]);
+  const at = Math.min(sel, rows.length - 1);
+  const apply = (i: number) => {
+    const r = rows[i];
+    if (!r) return;
+    close();
+    void setEnumDisplay(dialog.key, r.def.id);
+  };
+  return (
+    <Modal title={`Display 0x${dialog.value} as an enum`} onClose={close}>
+      <input
+        ref={inputRef}
+        className="modal-input"
+        value={text}
+        placeholder="Filter enums or members…"
+        spellCheck={false}
+        onChange={(e) => {
+          setText(e.target.value);
+          setSel(0);
+        }}
+        onKeyDown={(e) => {
+          if (e.key === 'ArrowDown') (e.preventDefault(), setSel(Math.min(at + 1, rows.length - 1)));
+          else if (e.key === 'ArrowUp') (e.preventDefault(), setSel(Math.max(at - 1, 0)));
+          else if (e.key === 'Enter') apply(at);
+        }}
+      />
+      <div className="goto-list enum-list">
+        {rows.length === 0 && <div className="goto-hint dim">No enum has a member with this value. Declare one in the Types view (enum Name {'{ … }'}).</div>}
+        {rows.map((r, i) => (
+          <div key={r.def.id} className={`goto-item enum-item${i === at ? ' active' : ''}`} onMouseEnter={() => setSel(i)} onClick={() => apply(i)}>
+            <span className="enum-name">{r.def.name}</span>
+            <span className="enum-shown">{r.shown}</span>
+            <span className="dim">{r.def.source === 'user' ? 'declared' : r.def.kind === 'flags' ? 'flags' : 'library'}</span>
+          </div>
+        ))}
+      </div>
+      <div className="modal-foot">
+        <span className="dim">Enter: apply · the listing and the pseudocode show the member names at this instruction · Ctrl+Z undoes</span>
+        {current && (
+          <button onClick={() => (close(), void setEnumDisplay(dialog.key, null))} title="Show the number again">
+            Reset
+          </button>
+        )}
+        <button onClick={close}>Close</button>
+      </div>
+    </Modal>
+  );
 }
 
 /** Ctrl+M: every bookmark of the binary; Enter or click jumps, Delete removes. */

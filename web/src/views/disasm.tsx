@@ -4,6 +4,7 @@ import type { Instruction, Listing, OperandRef, ResolvedTarget } from '../api.ts
 import { getState, navigate, setCursor, useStore } from '../store.ts';
 import { numberKey, operandTokens } from './tokens.ts';
 import { mangledNote } from '../util.ts';
+import { formatEnum } from '../engine/enums.ts';
 
 export interface ResolvedRef extends OperandRef {
   local: boolean;
@@ -30,12 +31,13 @@ export function branchTargets(listing: Listing): Set<string> {
 }
 
 /** Plain operand text split into highlightable tokens (spans with data-k). */
-function plainTokens(text: string, parts: React.ReactNode[], key: { n: number }): void {
+function plainTokens(text: string, parts: React.ReactNode[], key: { n: number }, enumText: (key: string) => string | null): void {
   for (const t of operandTokens(text)) {
+    const shown = t.key ? enumText(t.key) : null;
     if (t.key)
       parts.push(
-        <span key={key.n++} data-k={t.key}>
-          {t.text}
+        <span key={key.n++} data-k={t.key} className={shown ? 't-enum' : undefined} title={shown ? `${t.text} shown as an enum — M changes it` : undefined}>
+          {shown ?? t.text}
         </span>,
       );
     else parts.push(t.text);
@@ -51,6 +53,15 @@ export function refKey(r: ResolvedRef): string {
 
 export function Operands({ insn, local }: { insn: Instruction; local: Set<string> }) {
   const selection = useStore((s) => s.selection);
+  const displays = useStore((s) => s.enumDisplays);
+  const catalog = useStore((s) => s.enumCatalog);
+  /** An immediate shown as an enum (M) at this instruction. */
+  const enumText = (k: string): string | null => {
+    if (!k.startsWith('n:') || !catalog) return null;
+    const id = displays[`${insn.addr}|${k.slice(2)}`];
+    const def = id ? catalog.find((d) => d.id === id) : undefined;
+    return def ? formatEnum(def, BigInt(`0x${k.slice(2)}`)) : null;
+  };
   const refs = resolveRefs(insn, local);
   const parts: React.ReactNode[] = [];
   let rest = insn.operands;
@@ -58,7 +69,7 @@ export function Operands({ insn, local }: { insn: Instruction; local: Set<string
   for (const r of refs) {
     const at = rest.indexOf(r.text);
     if (at < 0) continue;
-    if (at > 0) plainTokens(rest.slice(0, at), parts, key);
+    if (at > 0) plainTokens(rest.slice(0, at), parts, key, enumText);
     const shown = r.local ? labelFor(r.addr) : r.kind === 'function' ? r.label : r.text;
     const selected = selection?.kind === 'addr' && selection.addr === r.addr;
     parts.push(
@@ -81,7 +92,7 @@ export function Operands({ insn, local }: { insn: Instruction; local: Set<string
     );
     rest = rest.slice(at + r.text.length);
   }
-  if (rest) plainTokens(rest, parts, key);
+  if (rest) plainTokens(rest, parts, key, enumText);
   return <span className="op">{parts}</span>;
 }
 

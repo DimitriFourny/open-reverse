@@ -638,6 +638,11 @@ select:focus {
 .t-pp {
   color: #8b95a7;
 }
+/* A constant shown as an enum member (M). */
+.t-enum {
+  color: var(--type);
+  font-style: italic;
+}
 .t-call {
   color: #dcdcaa;
 }
@@ -1256,6 +1261,62 @@ select:focus {
 }
 .lib-type:hover .lib-actions {
   visibility: visible;
+}
+/* Type libraries (bundled header types) */
+.bundled {
+  padding: 4px 12px 8px;
+  font-family: var(--mono);
+  font-size: 12px;
+}
+.bundled-search {
+  width: min(520px, 100%);
+  margin: 2px 0 6px;
+  font-family: var(--ui);
+}
+.bundled-row {
+  display: flex;
+  gap: 12px;
+  align-items: baseline;
+  padding: 2px 4px;
+  border-radius: 3px;
+  cursor: pointer;
+}
+.bundled-row:hover,
+.bundled-type.open .bundled-row {
+  background: var(--bg-2);
+}
+.bundled-name {
+  color: var(--type);
+  min-width: 220px;
+}
+.bundled-header {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.bundled-in {
+  color: var(--str);
+  font-family: var(--ui);
+}
+.bundled-code {
+  margin: 2px 0 6px 16px;
+  padding: 4px 8px;
+  border-left: 2px solid var(--border);
+}
+.enum-item {
+  justify-content: flex-start;
+  gap: 12px;
+}
+.enum-name {
+  color: var(--type);
+  min-width: 160px;
+}
+.enum-shown {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .t-global {
   cursor: pointer;

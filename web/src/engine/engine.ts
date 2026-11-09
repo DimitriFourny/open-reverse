@@ -624,6 +624,30 @@ export class Engine {
     return result;
   }
 
+  /** The header types bundled for the binary's platform. */
+  async bundledTypes(bid: string) {
+    return (await this.#session(bid)).bundledTypes();
+  }
+
+  async bundledTypeDeclaration(bid: string, name: string) {
+    if (typeof name !== 'string') throw new ApiError(400, 'Missing type name');
+    return { text: (await this.#session(bid)).bundledTypeDeclaration(name) };
+  }
+
+  async enumCatalog(bid: string) {
+    return { enums: await (await this.#session(bid)).enumCatalog() };
+  }
+
+  async enumDisplays(bid: string) {
+    return { enums: await (await this.#session(bid)).enumDisplays() };
+  }
+
+  async setEnumDisplay(bid: string, key: string, id: string | null) {
+    const enums = await (await this.#session(bid)).setEnumDisplay(String(key), id === null ? null : String(id));
+    void vfs.flush();
+    return { enums };
+  }
+
   async removeLibraryTypes(bid: string, annotationIds: string[]) {
     if (!Array.isArray(annotationIds)) throw new ApiError(400, 'Missing annotation ids');
     const result = await (await this.#session(bid)).removeLibraryTypes(annotationIds.map(String));

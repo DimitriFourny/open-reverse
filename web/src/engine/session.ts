@@ -6,6 +6,10 @@ import type { QueryService } from '@od/service/queries/index.js';
 import { entityIdentity, typeLibraryIdentity, userTypeIdentity } from '@od/core/identity.js';
 import { encodeTypeDefinition } from '@od/core/serialization.js';
 import { parseCDeclarations } from '@od/metadata/c-declarations/index.js';
+import { CONSTANT_SETS, type ConstantSet } from '@od/metadata/library-contracts/constants.js';
+import { libraryTypeCatalog, libraryTypeDeclaration } from '@od/metadata/library-contracts/declarations.js';
+import { libraryConstant } from '@od/metadata/library-contracts/generated/types/index.js';
+import { hexValue, type EnumDef, type EnumMember } from './enums.ts';
 import { MachOLoader } from '@od/loaders/macho/index.js';
 import { recoverRuntimeMetadata } from '@od/metadata/runtime/index.js';
 import { recoverDebugInfo } from '@od/metadata/debug/index.js';
@@ -859,6 +863,84 @@ export class AnalysisSession {
     }));
     for (const t of library) if (t.name) this.#typeNames.set(t.name, t.typeId);
     return { text: data.text ?? '', state: result.state, libraryId: data.library_id ?? null, library };
+  }
+
+  // --------------------------------------------- bundled type libraries, enums
+
+  /** The binary's target ABI (`sysv-amd64`, `darwin-arm64`, `windows-x64`). */
+  get #abi(): 'sysv-amd64' | 'darwin-arm64' | 'windows-x64' {
+    return this.binary.image.target.abi as 'sysv-amd64' | 'darwin-arm64' | 'windows-x64';
+  }
+
+  /** The header records and typedefs bundled for the binary's platform (IDA's type libraries). */
+  bundledTypes() {
+    const entries = libraryTypeCatalog(this.#abi);
+    return { abi: this.#abi, source: entries[0]?.source ?? '', entries };
+  }
+
+  /** C declarations of one bundled type and what it holds by value, ready for `types_declare`. */
+  bundledTypeDeclaration(name: string): string {
+    const text = libraryTypeDeclaration(this.#abi, name);
+    if (text === undefined) throw new ApiError(404, `No bundled type ${name}`);
+    return text;
+  }
+
+  /** Every enum a constant can be displayed as: the platform's bundled constant sets, then the declared enums. */
+  async enumCatalog(): Promise<EnumDef[]> {
+    const abi = this.#abi;
+    const members = (names: readonly string[]): EnumMember[] =>
+      names.flatMap((name) => {
+        const value = libraryConstant(abi, name);
+        return value === undefined ? [] : [{ name, value: hexValue(value) }];
+      });
+    const out: EnumDef[] = [];
+    for (const [name, set] of Object.entries(CONSTANT_SETS) as [string, ConstantSet][]) {
+      if (set.kind === 'octal') continue;
+      const list: EnumMember[] = [];
+      const fields: NonNullable<EnumDef['fields']> = [];
+      for (const field of set.fields ?? []) {
+        const mask = /^0x/.test(field.mask) ? BigInt(field.mask) : libraryConstant(abi, field.mask);
+        // A field whose mask the platform lacks (Darwin MAP_TYPE) lists its names as plain members.
+        if (mask === undefined) list.push(...members(field.names));
+        else fields.push({ mask: hexValue(mask), members: members(field.names) });
+      }
+      list.push(...members(set.names));
+      if (!list.length && !fields.length) continue;
+      out.push({ id: `lib:${name}`, name, kind: set.kind, members: list, ...(fields.length ? { fields } : {}), source: 'library' });
+    }
+    const declared = (await this.#workspace.data(this.record.id)).enumTypes ?? {};
+    for (const [name, list] of Object.entries(declared)) out.push({ id: `user:${name}`, name, kind: 'values', members: list, source: 'user' });
+    return out;
+  }
+
+  /** Constants displayed as enums: `<0xinsn>|<hex>` -> enum id. */
+  async enumDisplays(): Promise<Record<string, string>> {
+    return (await this.#workspace.data(this.record.id)).enums ?? {};
+  }
+
+  /** Displays the constant `key` (`<0xinsn>|<hex>`) as enum `id`; null shows the number again. */
+  async setEnumDisplay(key: string, id: string | null): Promise<Record<string, string>> {
+    if (!/^0x[0-9a-f]{1,16}\|-?[0-9a-f]{1,16}$/.test(key)) throw new ApiError(400, `Invalid constant ${key}`);
+    if (id !== null && !/^(?:lib|user):[A-Za-z_]\w*$/.test(id)) throw new ApiError(400, `Invalid enum ${id}`);
+    const data = await this.#workspace.data(this.record.id);
+    const enums = { ...(data.enums ?? {}) };
+    if (id === null) delete enums[key];
+    else enums[key] = id;
+    await this.#workspace.setData(this.record.id, { ...data, enums });
+    return enums;
+  }
+
+  /** Keeps the enumerators of the enums a declaration defines (OpenDecomp stores an enum as its integer). */
+  async #rememberEnums(source: string): Promise<void> {
+    const parsed = parseCDeclarations(source, { abi: this.#abi });
+    const found: Record<string, EnumMember[]> = {};
+    for (const [name, key] of parsed.named) {
+      const list = parsed.enumerators.get(key);
+      if (list?.length && /^[A-Za-z_]\w*$/.test(name)) found[name] = list.map((m) => ({ name: m.name, value: hexValue(m.value) }));
+    }
+    if (!Object.keys(found).length) return;
+    const data = await this.#workspace.data(this.record.id);
+    await this.#workspace.setData(this.record.id, { ...data, enumTypes: { ...(data.enumTypes ?? {}), ...found } });
   }
 
   // ------------------------------------------------------------------ memory
@@ -1919,6 +2001,7 @@ export class AnalysisSession {
         else if (/^[A-Za-z_][A-Za-z0-9_]*\*$/.test(t.key)) this.#typeNames.set(t.key, t.type_id);
       }
       const named = new Map(data.types.flatMap((t) => (t.name ? [[t.name, t.annotation_id] as const] : [])));
+      await this.#rememberEnums(source);
       return { revision: data.revision, declared: [...named.keys()], annotations: Object.fromEntries(named) };
     });
   }
