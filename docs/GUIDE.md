@@ -121,29 +121,33 @@ Import (the **Import project archive…** button, or drop a `.orproj.zip` on the
 
 `test/e2e/bench.mjs` times the built site in Chromium through the UI (one decompile worker, a fresh browser profile per binary): opening (to the function list, the first disassembly, the first pseudocode, the end of discovery), the first requests after discovery, a large function's listing and graph and a median one's pseudocode, every function's disassembly (an immediate search, then again from its cache), every function's listing with its graph (what a diff's signature table needs), scrolling the linear listing, a find that reads the rest of the image, and memory (the engine's, and the whole browser's resident memory). Run it against `bun run preview` with `OPEN_REVERSE_URL` and `PLAYWRIGHT_PATH` as for the e2e test: `node test/e2e/bench.mjs [binary ...]` (`BENCH_JSON=<file>` writes the results, `BENCH_SKIP=diff,find` skips phases). OpenDecomp's own benchmark of the same requests under Node is `scripts/bench/browse.ts` in the submodule.
 
-Stripped `/bin/ls` (158 KB, 428 functions, 105k instructions), 4-core VM, before → after the performance work:
+Before → after the performance work, on a 4-core VM shared with other jobs (runs vary by up to ~25%; two runs each where given):
 
-| | before | after |
+| | `/bin/ls` (stripped, 158 KB, 428 functions, 105k instructions) | `/usr/bin/python3.13` (6.8 MB) |
 | --- | ---: | ---: |
-| open → function list | 8.2 s | 8.3 s |
-| open → disassembly | 36.5 s | 9.3 s |
-| open → pseudocode | 41.6 s | 10.3 s |
-| discovery done | 41.6 s | 32.0 s |
-| every function's disassembly (immediate search) | 46.1 s | 27.9 s |
-| every function's listing + graph (diff signatures) | 92.0 s | 54.7 s |
-| scroll the listing by 4000 rows | 1.0 s | 0.9 s |
-| find: rest of the image | (loaded slice only) | 33.5 s |
+| open → function list | 8.2 s → 7.2–8.3 s | 18.3 s → 15.2 s |
+| open → disassembly | 36.5 s → 8.2–9.3 s | 126 s → 18.8 s |
+| open → pseudocode | 41.6 s → 9.3–10.3 s | 129 s → 20.3 s |
+| discovery done (python: fails, see below) | 41.6 s → 27.9–32.0 s | 129 s → 93 s |
+| a large function's listing | 0.87 s → 0.39–0.42 s | 2.96 s → 0.61 s |
+| every function's disassembly (immediate search) | 46.1 s → 27.9–35.3 s | |
+| every function's listing + graph (diff signatures) | 92.0 s → 52.5–54.7 s | |
+| scroll the listing by 4000 rows | 1.0 s → 0.8 s | |
+| find to the end of the image | loaded slice only → 30–34 s | |
+
+The fixtures (`pe-x86_64-symbols.exe`, `macho-arm64-symbols`) and `/tmp/sshpass` open and run every phase in a few seconds before and after (sshpass: every function's disassembly 1.8 s → 0.5 s).
 
 Where the time went, and what changed:
 - **Worker hops**: the in-thread project worker's framed protocol (request, admission, progress, result) crossed `setTimeout(0)` hops, which browsers clamp to 4 ms once nested: about 25 ms of idle time per OpenDecomp request. They are now `MessageChannel` tasks (`shims/immediate.ts`).
 - **SHA-256**: OpenDecomp derives every identity (instructions, references, evidence, cursors) from a SHA-256 of a short string, hundreds of thousands of times per binary; the shim now hashes strings in one pass over reused buffers (`shims/sha256.ts`, about 4× faster than `@noble/hashes` behind the `buffer` polyfill).
 - **SQLite**: the shim binds parameters and reads rows through the raw SQLite exports (strings encoded straight into WASM memory, column names read once per statement, blobs copied once).
-- **OpenDecomp**: a function's CFG after its listing reuses the listing's traversal instead of disassembling the function again, and a warm image read compares the stored file with the verified bytes instead of hashing it again (that hash cost grew with the binary: tens of milliseconds per request on a 7 MB binary).
+- **OpenDecomp**: a function's CFG after its listing reuses the listing's traversal instead of disassembling the function again; a warm image read compares the stored file with the verified bytes instead of hashing it again (that hash cost grew with the binary: tens of milliseconds per request on a 7 MB binary); and a complete scan of a kind of records at a revision is kept, so `xrefs_get` no longer decodes every reference record per query (3.2 s per query on `/bin/ls` under Node; this app used to patch that in at build time).
 - **Discovery** yields to the UI (above).
 
 Known limits (OpenDecomp, not changed here):
 - The project database grows to ~700× the binary (117 MB for `/bin/ls`: 64k reference records of ~780 bytes, 24k evidence rows, and a job row per request); it lives in the engine's WASM memory, and every helper worker holds a copy.
-- `/usr/bin/python3.13` (6.8 MB, ~1500 functions in the import's index) does not finish discovery: the step holds every traversed graph and dies of memory past ~2 GB (also under Node); with smaller steps it fails on a function record citing more than 1000 evidence IDs (`_Py_Dealloc`, called from ~1700 sites).
+- `/usr/bin/x86_64-linux-gnu-lto-dump-14` (33 MB) does not open: the import exceeds OpenDecomp's default work budget and, with more, its image metadata byte cap.
+- `/usr/bin/python3.13` (6.8 MB, ~1500 functions in the import's index) does not finish discovery (the function list stays at the import's index): the step holds every traversed graph and dies of memory past ~2 GB (also under Node); with smaller steps it fails on a function record citing more than 1000 evidence IDs (`_Py_Dealloc`, called from ~1700 sites).
 - The first request after a discovery step (or any new revision) reads every function, symbol and reference record of the image back (~8 s for `/bin/ls`).
 - Some decompiles fail with an over-long diagnostic (`/bin/ls` `sub_92c0`: a message over 8192 characters fails the result schema).
 
