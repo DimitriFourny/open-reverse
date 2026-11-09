@@ -21,8 +21,10 @@ import {
   type DataAction,
   type DataDef,
   type XrefDirection,
+  type DebugSummary,
 } from './api.ts';
 import { historyFor, type UndoEntry } from './undo.ts';
+import { looksLikeDebugFile } from './engine/debugfile.ts';
 import { canon, cIdentifier } from './util.ts';
 
 export type ViewMode = 'linear' | 'graph' | 'hex' | 'types';
@@ -66,6 +68,8 @@ export type Dialog =
   | { kind: 'bookmarks' }
   /** Pick the other binary to diff the open one with. */
   | { kind: 'diffWith' }
+  /** The open binary's debug information: what was found, add/replace/remove its debug file. */
+  | { kind: 'debugInfo' }
   | { kind: 'open' };
 
 export type XrefTarget = { id?: string; addr?: string };
@@ -244,6 +248,77 @@ export async function uploadAndOpen(file: File): Promise<void> {
   } catch (e) {
     toast(errorText(e), 'error');
   }
+}
+
+/**
+ * Several files dropped or picked at once: a binary and its debug file (a dSYM DWARF file or
+ * zipped .dSYM, an ELF debug file). The binary is stored, paired with the debug file and opened.
+ */
+export async function uploadFiles(files: File[]): Promise<void> {
+  if (files.length === 1) return uploadAndOpen(files[0]!);
+  const kinds = await Promise.all(files.map(async (f) => looksLikeDebugFile(f.name, new Uint8Array(await f.arrayBuffer()))));
+  const binaries = files.filter((_, i) => !kinds[i]);
+  const debugs = files.filter((_, i) => kinds[i]);
+  if (binaries.length !== 1 || debugs.length > 1) {
+    toast(`Drop one binary, optionally with its debug file (got ${binaries.length} binaries and ${debugs.length} debug files)`, 'error');
+    return;
+  }
+  try {
+    toast(`Uploading ${binaries[0]!.name}…`);
+    const record = await api.upload(binaries[0]!);
+    await refreshBinaries();
+    if (debugs[0]) await attachDebugFile(record.id, debugs[0]);
+    await openBinary(record.id);
+  } catch (e) {
+    toast(errorText(e), 'error');
+  }
+}
+
+/** Pairs `file` with binary `bid`: true when OpenDecomp matched it (a toast says either way). */
+async function attachDebugFile(bid: string, file: File): Promise<boolean> {
+  toast(`Matching ${file.name}…`);
+  try {
+    await api.addDebugFile(bid, file);
+    await refreshBinaries();
+    toast(`Debug file ${file.name} added`);
+    return true;
+  } catch (e) {
+    toast(errorText(e), 'error');
+    return false;
+  }
+}
+
+/** Add (or replace) the open binary's debug file; the binary reopens with it, where it was. */
+export async function addDebugFile(file: File): Promise<void> {
+  const bid = state.bid;
+  if (!bid) return;
+  const at = state.loc ? { addr: state.loc.addr, view: state.loc.view } : undefined;
+  const ok = await attachDebugFile(bid, file);
+  await openBinary(bid, at);
+  const debug = getState().info?.image.debug;
+  if (ok && debug) toast(debugSummaryText(debug));
+}
+
+/** Forget the open binary's debug file; it reopens without (its earlier analysis returns). */
+export async function removeDebugFile(): Promise<void> {
+  const bid = state.bid;
+  if (!bid) return;
+  const at = state.loc ? { addr: state.loc.addr, view: state.loc.view } : undefined;
+  try {
+    await api.removeDebugFile(bid);
+    await refreshBinaries();
+    toast('Debug file removed');
+  } catch (e) {
+    toast(errorText(e), 'error');
+  }
+  await openBinary(bid, at);
+}
+
+/** One line on what debug recovery found: `Debug info: 8 functions, 39 types (dSYM, matched by UUID)`. */
+export function debugSummaryText(d: DebugSummary): string {
+  if (d.source === 'none') return 'No debug information';
+  const from = d.source === 'companion' ? `debug file, matched by ${d.matched_by === 'uuid' ? 'UUID' : d.matched_by === 'build-id' ? 'build ID' : 'debuglink CRC'}` : 'embedded';
+  return `Debug info (${from}): ${d.functions} functions, ${d.types} types, ${d.variables} variables, ${d.lines} line rows${d.status === 'partial' ? ', partly unsupported' : ''}`;
 }
 
 export async function deleteBinary(bid: string): Promise<void> {

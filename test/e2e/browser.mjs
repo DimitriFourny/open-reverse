@@ -7,14 +7,14 @@
 // SSHPASS_BINARY (an arm64 Mach-O sshpass with an `args` global, default /tmp/sshpass, skipped if absent),
 // PLAYWRIGHT_PATH (a playwright package directory, when it is not installed here), E2E_TMP (scratch directory),
 // E2E_LOG (a file to write a timestamped trace to: console messages, workers, toasts, task panel, failures in full).
-import { appendFileSync, existsSync, mkdirSync, readFileSync } from 'node:fs';
+import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { createServer } from 'node:http';
 import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { decodeProjectArchive } from '../../web/src/engine/archive.ts';
-import { zipDecode } from '../../web/src/engine/zip.ts';
+import { zipDecode, zipEncode } from '../../web/src/engine/zip.ts';
 
 let chromium;
 try {
@@ -26,6 +26,8 @@ try {
 const TMP = process.env.E2E_TMP ?? join(tmpdir(), `open-reverse-e2e-${process.pid}`);
 mkdirSync(TMP, { recursive: true });
 const FIX = fileURLToPath(new URL('../../vendor/open-decomp/fixtures/bin/', import.meta.url));
+// OpenDecomp's ELF debug-info fixtures (shapes.c: stripped image + objcopy --only-keep-debug file).
+const ELFDBG = fileURLToPath(new URL('../../vendor/open-decomp/test/metadata/debug/fixtures/elf/', import.meta.url));
 // OpenDecomp's Objective-C test inputs (test/metadata/fixtures/objc-foundation.m, built with objc_msgSend + __objc_selrefs).
 const OBJC = fileURLToPath(new URL('../../vendor/open-decomp/test/metadata/fixtures/objc-foundation-classic', import.meta.url));
 const URL_ = process.env.OPEN_REVERSE_URL ?? 'http://localhost:5199/';
@@ -110,12 +112,13 @@ process.on('unhandledRejection', (e) => {
   });
   await step('rename a parameter from the pseudocode via N', async () => {
     await page.locator('.side-item', { hasText: 'my_max' }).click();
-    await page.locator('.pane-pseudo .tok.t-var', { hasText: 'arg0' }).first().click();
+    // The fixture's DWARF names the parameters (`a`, `b`); a rename still wins.
+    await page.locator('.pane-pseudo .tok.t-var').filter({ hasText: /^a$/ }).first().click();
     await page.keyboard.press('n');
     await page.fill('.modal-input', 'lhs');
     await page.keyboard.press('Enter');
     await page.waitForSelector('.pline:has-text("my_max(int32_t lhs")', { timeout: 120000 });
-    await page.waitForSelector('.pline:has-text("return lhs >")');
+    await page.waitForSelector('.pline:has-text("lhs > b")');
     await page.locator('.side-item', { hasText: 'fixture_check' }).click();
   });
   await step('comment', async () => {
@@ -987,6 +990,43 @@ return (await or.xrefsTo(s.addr)).length`);
       const expected = /CORS policy|Failed to load resource|ERR_FAILED/;
       for (let i = errors.length - 1; i >= seen; i--) if (expected.test(errors[i])) errors.splice(i, 1);
     }
+  });
+
+  await step('debug file: a stripped ELF dropped with its debug file gets names, prototypes, structures, locals; a wrong one is refused', async () => {
+    await page.locator('.brand').click();
+    await page.setInputFiles('input[type=file]', [ELFDBG + 'shapes-stripped', ELFDBG + 'shapes.debug']);
+    await page.waitForSelector('.debug-badge.loaded:has-text("debug file")', { timeout: 120000 });
+    await page.locator('.side-item', { hasText: 'registry_add' }).click();
+    await page.waitForSelector('.pline:has-text("void registry_add(registry_t* reg, shape* s)")', { timeout: 120000 });
+    await page.waitForSelector('.pline:has-text("reg->count = 1 + reg->count;")');
+    await page.locator('.side-item', { hasText: 'registry_visit' }).click();
+    await page.waitForSelector('.pline:has-text("uint32_t visited;")', { timeout: 120000 });
+    await page.locator('.debug-badge').click();
+    await page.waitForSelector('.debug-status:has-text("matched by build ID")');
+    await page.setInputFiles('[data-testid=debug-file-input]', ELFDBG + 'shapes-nobuildid.debug');
+    await page.waitForSelector('.toast-error:has-text("is not the debug file of shapes-stripped")', { timeout: 120000 });
+    await page.waitForSelector('.debug-badge.loaded', { timeout: 120000 });
+  });
+  await step('debug file: a stripped Mach-O gets its zipped .dSYM from the dialog; the archive keeps it; remove', async () => {
+    const dsymDir = 'macho-arm64-symbols.dSYM/Contents/Resources/DWARF/macho-arm64-symbols';
+    const dwarf = readFileSync(FIX + dsymDir);
+    const zipPath = join(TMP, 'macho-arm64-symbols.dSYM.zip');
+    writeFileSync(zipPath, await zipEncode([{ path: dsymDir, data: dwarf }]));
+    await page.locator('.brand').click();
+    await page.setInputFiles('input[type=file]', FIX + 'macho-arm64-stripped');
+    await page.waitForSelector('.debug-badge:has-text("+ debug")', { timeout: 120000 });
+    await page.locator('.debug-badge').click();
+    await page.waitForSelector('.debug-dialog');
+    await page.setInputFiles('[data-testid=debug-file-input]', zipPath);
+    await page.waitForSelector('.debug-badge.loaded:has-text("dSYM")', { timeout: 120000 });
+    await page.locator('.side-item', { hasText: 'fixture_arithmetic' }).click();
+    await page.waitForSelector('.pline:has-text("fixture_arithmetic(uint32_t a, uint32_t b)")', { timeout: 120000 });
+    const { bytes } = await download(page, () => exportItem('export-archive'));
+    const archive = await decodeProjectArchive(bytes);
+    if (archive.record.debug?.kind !== 'dsym' || Buffer.compare(Buffer.from(archive.debug), dwarf) !== 0) throw new Error('debug file missing from the archive');
+    await page.locator('.debug-badge').click();
+    await page.locator('.debug-dialog button', { hasText: 'Remove debug file' }).click();
+    await page.waitForSelector('.debug-badge:has-text("+ debug")', { timeout: 120000 });
   });
 
   console.log('console errors:', errors.length ? errors : 'none');

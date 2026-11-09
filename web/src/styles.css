@@ -1700,3 +1700,51 @@ select:focus {
 .diff-line.k-added .diff-cell.empty {
   background: repeating-linear-gradient(135deg, transparent 0 6px, #ffffff08 6px 12px);
 }
+
+/* --------------------------------------------------------------- debug info */
+.debug-badge {
+  font-size: 11px;
+  padding: 1px 7px;
+  color: var(--fg-dim);
+}
+.debug-badge.loaded {
+  color: var(--fn);
+  border-color: #2f5a42;
+}
+.debug-badge.warn {
+  color: var(--warn);
+  border-color: #6b5a1c;
+}
+.debug-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+.debug-table th {
+  text-align: left;
+  vertical-align: top;
+  color: var(--fg-dim);
+  font-weight: normal;
+  padding: 3px 10px 3px 0;
+  white-space: nowrap;
+}
+.debug-table td {
+  padding: 3px 0;
+  overflow-wrap: anywhere;
+}
+.debug-table .mono {
+  font-family: var(--mono);
+}
+.debug-diagnostics {
+  margin: 0;
+  padding-left: 16px;
+  max-height: 120px;
+  overflow: auto;
+}
+.debug-dialog p {
+  font-size: 12px;
+}
+.recent-debug {
+  font-size: 11px;
+  color: var(--fn);
+}

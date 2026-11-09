@@ -22,6 +22,7 @@ import { NAV_LEGEND, NavStrip, navStripHidden } from './components/NavStrip.tsx'
 import { SearchPanel } from './components/SearchPanel.tsx';
 import { ScriptConsole } from './components/ScriptConsole.tsx';
 import { DiffView } from './components/DiffView.tsx';
+import { DebugBadge } from './components/DebugInfo.tsx';
 import { getDiff, resetDiff, showDiff, useDiff } from './diff.ts';
 import { getConsole, stopScript, toggleConsole } from './scripting.ts';
 import { closeSearch, getSearch, openSearch } from './search.ts';
@@ -50,7 +51,7 @@ import {
   togglePseudo,
   toast,
   undo,
-  uploadAndOpen,
+  uploadFiles,
   useStore,
   type ViewMode,
 } from './store.ts';
@@ -143,15 +144,23 @@ function FilePicker({ children, className }: { children: React.ReactNode; classN
       <input
         ref={ref}
         type="file"
+        multiple
         hidden
         onChange={(e) => {
-          const f = e.target.files?.[0];
-          if (f) void (isProjectArchive(f) ? importArchive(f) : uploadAndOpen(f));
+          openFiles([...(e.target.files ?? [])]);
           e.target.value = '';
         }}
       />
     </>
   );
+}
+
+/** Files picked or dropped together: a project archive, a binary, or a binary and its debug file. */
+function openFiles(files: File[]): void {
+  const f = files[0];
+  if (!f) return;
+  if (files.length === 1 && isProjectArchive(f)) void importArchive(f);
+  else void uploadFiles(files);
 }
 
 function Home() {
@@ -165,8 +174,7 @@ function Home() {
       onDrop={(e) => {
         e.preventDefault();
         setDrag(false);
-        const f = e.dataTransfer.files[0];
-        if (f) void (isProjectArchive(f) ? importArchive(f) : uploadAndOpen(f));
+        openFiles([...e.dataTransfer.files]);
       }}
     >
       <div className="home-card">
@@ -175,7 +183,7 @@ function Home() {
         </h1>
         <p className="dim">Reverse engineering in the browser, powered by OpenDecomp. Mach-O ARM64, PE x86-64 and ELF x86-64.</p>
         <div className="dropzone">
-          Drop a binary or a project archive here or <FilePicker className="primary">Open file…</FilePicker>
+          Drop a binary (with its debug file: dSYM, ELF .debug) or a project archive here or <FilePicker className="primary">Open file…</FilePicker>
         </div>
         <OpenUrlField />
         <div className="home-actions">
@@ -187,7 +195,15 @@ function Home() {
             <div className="recent">
               {binaries.map((b) => (
                 <div key={b.id} className="recent-item" onClick={() => void openBinary(b.id)}>
-                  <span className="recent-name">{b.name}</span>
+                  <span className="recent-name">
+                    {b.name}
+                    {b.debug && (
+                      <span className="recent-debug" title={`Debug file: ${b.debug.name}`}>
+                        {' '}
+                        + {b.debug.kind === 'dsym' ? 'dSYM' : 'debug'}
+                      </span>
+                    )}
+                  </span>
                   <span className="dim">{fmtSize(b.size)}</span>
                   <UsageCell id={b.id} />
                   <span className="dim">{new Date(b.addedAt).toLocaleString()}</span>
@@ -369,6 +385,7 @@ function TopBar({ showNav, onToggleNav }: { showNav?: boolean; onToggleNav?: () 
           </span>
         </span>
       )}
+      <DebugBadge />
       {info && (
       <>
       <div className="nav-buttons">
@@ -462,6 +479,7 @@ function StatusBar() {
             : ''}
         </span>
       )}
+      <SourceLine />
       {open && (
         <span className="dim">
           {count} functions · rev {revision}
@@ -477,6 +495,34 @@ function StatusBar() {
       <span className="spacer" />
       <span className="dim keys">G go · ↑↓ move · Enter follow · Ctrl+F find · N rename · Y type/signature · S create struct · X xrefs · Shift+X xrefs from · ; comment · D A O * U data · Alt+B/T/I search · Ctrl+Z undo · Alt+M mark · Ctrl+M marks · Shift+F2 script · Space graph · Tab pseudo · H hex · B bytes · Esc back</span>
     </div>
+  );
+}
+
+/** `shapes.c:42` for the cursor's address, from the binary's debug line table (when it has one). */
+function SourceLine() {
+  const bid = useStore((s) => s.bid);
+  const addr = useStore((s) => s.loc?.addr);
+  const hasLines = useStore((s) => (s.info?.image.debug?.lines ?? 0) > 0);
+  const [source, setSource] = useState<{ addr: string; file: string; line: number } | null>(null);
+  useEffect(() => {
+    if (!bid || !addr || !hasLines) return setSource(null);
+    let live = true;
+    const t = setTimeout(() => {
+      api.sourceLine(bid, addr).then(
+        (r) => live && setSource(r.source ? { addr, file: r.source.file, line: r.source.line } : null),
+        () => live && setSource(null),
+      );
+    }, 80);
+    return () => {
+      live = false;
+      clearTimeout(t);
+    };
+  }, [bid, addr, hasLines]);
+  if (!source || source.addr !== addr) return null;
+  return (
+    <span className="dim status-source" title={`${source.file}:${source.line} (debug line table)`}>
+      {source.file.split('/').pop()}:{source.line}
+    </span>
   );
 }
 

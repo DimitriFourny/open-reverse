@@ -8,6 +8,9 @@ import { encodeTypeDefinition } from '@od/core/serialization.js';
 import { parseCDeclarations } from '@od/metadata/c-declarations/index.js';
 import { MachOLoader } from '@od/loaders/macho/index.js';
 import { recoverRuntimeMetadata } from '@od/metadata/runtime/index.js';
+import { recoverDebugInfo } from '@od/metadata/debug/index.js';
+import type { DebugLine } from '@od/metadata/dwarf/model.js';
+import { elfLoader } from '@od/loaders/elf/index.js';
 import { ImmutableBytes } from '@od/core/addresses.js';
 import { createOperationContext } from '@od/core/operation.js';
 import { demangleName } from '@od/metadata/symbols/index.js';
@@ -38,6 +41,7 @@ import { buildNavMap, runSearch, SearchError, type NavKind, type NavMap, type Re
 import type { TaskContext } from './tasks.ts';
 import { functionSignature, type FunctionSig } from './bindiff.ts';
 import type { BinaryRecord, Workspace } from './workspace.ts';
+import { SUPPORTED_DEBUG_KINDS } from './debugfile.ts';
 
 /** The largest budget OpenDecomp accepts: discovery of a real binary needs it. */
 const DISCOVERY_BUDGET = {
@@ -346,8 +350,11 @@ export class AnalysisSession {
   }
 
   static async open(workspace: Workspace, record: BinaryRecord, threads = 1): Promise<AnalysisSession> {
+    // A companion debug file OpenDecomp reads is imported with the binary (its own project).
+    const debugPath = record.debug && SUPPORTED_DEBUG_KINDS.includes(record.debug.kind) ? workspace.debugPath(record) : null;
     const binary = await openBinary(workspace.binaryPath(record), {
       cachePath: workspace.projectRoot(record.id),
+      ...(debugPath ? { debugPath } : {}),
       // Above 1, decompiles run in that many helper Web Workers (OpenDecomp request workers).
       ...(threads > 1 ? { requestWorkers: threads } : {}),
     });
@@ -670,6 +677,58 @@ export class AnalysisSession {
       return new Map<string, ObjCItem>();
     });
     return this.#objc;
+  }
+
+  /**
+   * The source line of `addr` from the debug line table (embedded DWARF or the binary's debug
+   * file), or null. OpenDecomp parses line tables but its query tools do not serve them, so the
+   * image is loaded here once more (lazily, only when its debug summary reports line rows) and
+   * read with the same debug recovery OpenDecomp runs.
+   */
+  async sourceLine(addr: string): Promise<{ file: string; line: number; column: number | null } | null> {
+    const rows = await this.#loadLines();
+    const at = BigInt(addr);
+    // Last row starting at or before `at` (rows are sorted by address); half-open interval.
+    let lo = 0,
+      hi = rows.length;
+    while (lo < hi) {
+      const mid = (lo + hi) >> 1;
+      if (rows[mid]!.address <= at) lo = mid + 1;
+      else hi = mid;
+    }
+    for (let i = lo - 1; i >= 0 && i >= lo - 8; i--) {
+      const row = rows[i]!;
+      if (row.endAddress !== undefined && at < row.endAddress) return { file: row.file, line: row.line, column: row.column ?? null };
+    }
+    return null;
+  }
+
+  #lines: Promise<DebugLine[]> | null = null;
+  #loadLines(): Promise<DebugLine[]> {
+    this.#lines ??= (async () => {
+      if (!this.binary.image.debug?.lines) return [];
+      const context = createOperationContext();
+      const format = this.binary.image.target.format;
+      const bytes = new ImmutableBytes(vfs.read(this.#workspace.binaryPath(this.record)));
+      const input = {
+        image_id: this.binary.image.id,
+        sha256: this.record.sha256,
+        bytes,
+        slice_id: (this.binary.image as { selected_slice_id?: string | null }).selected_slice_id ?? null,
+      };
+      const loaded = format === 'macho' ? new MachOLoader().load(input, context) : format === 'elf' ? elfLoader.load(input, context) : null;
+      if (!loaded) return [];
+      const debugPath = this.binary.image.debug.companion_sha256 ? this.#workspace.debugPath(this.record) : null;
+      const image = debugPath
+        ? { ...loaded, companion: { sha256: this.binary.image.debug.companion_sha256!, bytes: new ImmutableBytes(vfs.read(debugPath)) } }
+        : loaded;
+      const data = recoverDebugInfo(image, context).data;
+      return (data?.lines ?? []).filter((row) => !row.endSequence && row.endAddress !== undefined);
+    })().catch((error: unknown) => {
+      console.warn('Debug line table unavailable:', error instanceof Error ? error.message : String(error));
+      return [];
+    });
+    return this.#lines;
   }
 
   /** OpenDecomp's established references from the instructions of a function, by instruction address. */
