@@ -1,1 +1,0 @@
-function u(r,s){return r==="macho"&&s.startsWith("_")?s.slice(1):s}function i(r,s){if(r==="macho"){const c=u(r,s),o=c.indexOf("$");return o>0?c.slice(0,o):c}if(r==="elf"){const c=s.indexOf("@");return c>0?s.slice(0,c):s}return s.startsWith("__imp_")?s.slice(6):s}export{u as c,i as l};

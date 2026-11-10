@@ -1,0 +1,139 @@
+[
+  {
+    "id": "glibc-2.41-x86_64",
+    "title": "GNU C Library 2.41 (libc, libm, crt)",
+    "architecture": "x86_64",
+    "file": "glibc-2.41-x86_64.sigz",
+    "bytes": 332276,
+    "functions": 5014,
+    "signatures": 4058,
+    "contracts": "libc.so.6",
+    "source": "libc.a, libm-2.41.a, libmvec.a, crt1.o, Scrt1.o, rcrt1.o, crti.o, crtn.o (Debian 13: libc6-dev 2.41-12+deb13u4)",
+    "markers": [
+      "^GLIBC_TUNABLES$",
+      "glibc: malloc",
+      "^GNU C Library"
+    ]
+  },
+  {
+    "id": "libgcc-14-x86_64",
+    "title": "GCC 14 runtime (libgcc, libgcc_eh, crtbegin/crtend)",
+    "architecture": "x86_64",
+    "file": "libgcc-14-x86_64.sigz",
+    "bytes": 39350,
+    "functions": 747,
+    "signatures": 628,
+    "contracts": null,
+    "source": "libgcc.a, libgcc_eh.a, crtbeginT.o, crtbegin.o, crtbeginS.o, crtend.o, crtendS.o (Debian 13: libgcc-14-dev 14.2.0-19)",
+    "markers": [
+      "^GLIBC_TUNABLES$",
+      "^GCC: \\("
+    ]
+  },
+  {
+    "id": "libstdcxx-14-x86_64",
+    "title": "GNU C++ library 14 (libstdc++, libsupc++)",
+    "architecture": "x86_64",
+    "file": "libstdcxx-14-x86_64.sigz",
+    "bytes": 243461,
+    "functions": 5500,
+    "signatures": 2609,
+    "contracts": null,
+    "source": "libstdc++.a (Debian 13: libstdc++-14-dev 14.2.0-19)",
+    "markers": [
+      "^St9exception$",
+      "^NSt7__cxx11",
+      "basic_string::_M_"
+    ]
+  },
+  {
+    "id": "zlib-1.3.1-x86_64",
+    "title": "zlib 1.3.1",
+    "architecture": "x86_64",
+    "file": "zlib-1.3.1-x86_64.sigz",
+    "bytes": 7079,
+    "functions": 122,
+    "signatures": 116,
+    "contracts": null,
+    "source": "libz.a (Debian 13: zlib1g-dev 1:1.3.dfsg+really1.3.1-1+deb13u1)",
+    "markers": [
+      "^ ?(deflate|inflate) 1\\.3\\.1 Copyright",
+      "^incorrect header check$",
+      "^invalid distance too far back$"
+    ]
+  },
+  {
+    "id": "openssl-3.5-x86_64",
+    "title": "OpenSSL 3.5.7 (libcrypto, libssl)",
+    "architecture": "x86_64",
+    "file": "openssl-3.5-x86_64.sigz",
+    "bytes": 937357,
+    "functions": 15662,
+    "signatures": 10690,
+    "contracts": null,
+    "source": "libcrypto.a, libssl.a (Debian 13: libssl-dev 3.5.7-1~deb13u3)",
+    "markers": [
+      "^OpenSSL 3\\.5",
+      "OPENSSL_",
+      "^SHA256 block transform for x86_64"
+    ]
+  },
+  {
+    "id": "pcre2-10.46-x86_64",
+    "title": "PCRE2 10.46 (8-bit)",
+    "architecture": "x86_64",
+    "file": "pcre2-10.46-x86_64.sigz",
+    "bytes": 18022,
+    "functions": 298,
+    "signatures": 286,
+    "contracts": null,
+    "source": "libpcre2-8.a (Debian 13: libpcre2-dev 10.46-1~deb13u3)",
+    "markers": [
+      "^\\(\\*UTF\\)",
+      "PCRE2"
+    ]
+  },
+  {
+    "id": "expat-2.9-x86_64",
+    "title": "Expat 2.9.0",
+    "architecture": "x86_64",
+    "file": "expat-2.9-x86_64.sigz",
+    "bytes": 14682,
+    "functions": 351,
+    "signatures": 307,
+    "contracts": null,
+    "source": "libexpat.a (Debian 13: libexpat1-dev 2.9.0-1~deb13u1)",
+    "markers": [
+      "^expat_2\\.9"
+    ]
+  },
+  {
+    "id": "libxml2-2.9-x86_64",
+    "title": "libxml2 2.9.14",
+    "architecture": "x86_64",
+    "file": "libxml2-2.9-x86_64.sigz",
+    "bytes": 209029,
+    "functions": 2463,
+    "signatures": 2304,
+    "contracts": null,
+    "source": "libxml2.a (Debian 13: libxml2-dev 2.12.7+dfsg+really2.9.14-2.1+deb13u3)",
+    "markers": [
+      "^xmlParse",
+      "libxml2"
+    ]
+  },
+  {
+    "id": "libuv-1.50-x86_64",
+    "title": "libuv 1.50.0",
+    "architecture": "x86_64",
+    "file": "libuv-1.50-x86_64.sigz",
+    "bytes": 35246,
+    "functions": 600,
+    "signatures": 508,
+    "contracts": null,
+    "source": "libuv.a (Debian 13: libuv1-dev 1.50.0-2)",
+    "markers": [
+      "^uv_"
+    ]
+  }
+]
